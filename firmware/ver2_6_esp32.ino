@@ -15,12 +15,12 @@
 // ---------- Cấu hình Wi-Fi & Web Server ----------
 // Chế độ Access Point (ESP32 tự phát Wi-Fi, không cần router ngoài)
 const char* AP_SSID = "ESP32_Robot_Control";
-const char* AP_PASS = "12345678"; // Tối thiểu 8 ký tự
+const char* AP_PASS = ""; // Historical reference only; credentials removed, not a build target.
 
 // Nếu muốn kết nối vào Wi-Fi nhà/trường, đổi USE_AP_MODE thành false và điền SSID/PASS bên dưới:
 const bool USE_AP_MODE = true;
-const char* STA_SSID = "IoT LAB";
-const char* STA_PASS = "kvt1ptit";
+const char* STA_SSID = "";
+const char* STA_PASS = "";
 
 WebServer server(80);
 

@@ -1,0 +1,18 @@
+{
+  "wifi_ssid": "REPLACE_WITH_WIFI_SSID",
+  "wifi_password": "",
+  "backend_url": "https://smartrobot.lan/api/v1/devices",
+  "device_id": "REPLACE_WITH_ADMIN_DEVICE_ID",
+  "device_secret": "",
+  "ca_file": "",
+  "ntp_server": "pool.ntp.org",
+  "allow_http_lan": false,
+  "motors_enabled": false,
+  "allow_blind_manual": false,
+  "blind_manual_max_ms": 300,
+  "full_speed": 75,
+  "slow_speed": 30,
+  "turn_speed": 75,
+  "http_timeout_ms": 250,
+  "relay_console": false
+}
