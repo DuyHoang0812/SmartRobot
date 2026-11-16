@@ -1,5 +1,6 @@
 #pragma once
-// Exact wiring and electrical polarity from ver2_6_esp32.ino. No ENA/ENB GPIO exists.
+// GPIOs from ver2_6_esp32.ino; user confirms OUT1/2=RIGHT and OUT3/4=LEFT.
+// No ENA/ENB GPIO exists.
 #define PIN_IN1 19
 #define PIN_IN2 21
 #define PIN_IN3 5
@@ -16,3 +17,10 @@
 #define SENSOR_MAX_AGE_US INT64_C(250000)
 #define STOP_CM 15.0f
 #define WARN_CM 40.0f
+#define MOTOR_POWER_SETTLE_US INT64_C(50000)
+#define AUTO_SCAN_SAMPLE_WAIT_US INT64_C(800000)
+#define AUTO_SCAN_SAMPLES 3
+#define AUTO_BLOCKED_BACKUP_MAX_MS 800
+#define AUTO_BRAKE_US INT64_C(100000)
+#define AUTO_MAX_BACKUPS 1
+#define AUTO_RECOVERY_CLEAR_US INT64_C(500000)

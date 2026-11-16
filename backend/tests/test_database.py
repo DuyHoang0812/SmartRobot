@@ -67,7 +67,10 @@ def test_migrations_create_expected_schema(db_engine):
         "device_sessions",
     }
     with db_engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0004_devices"
+        assert (
+            connection.scalar(text("SELECT version_num FROM alembic_version"))
+            == "0005_persistent_borrow"
+        )
     assert len(inspector.get_foreign_keys("control_sessions")) == 3
     assert any(
         i["name"] == "uq_control_sessions_open_robot" and i["unique"]
@@ -90,6 +93,37 @@ def test_migration_matches_models_and_upgrade_is_idempotent(db_engine):
     with db_engine.begin() as connection:
         config = migration_config()
         config.attributes["connection"] = connection
+        command.upgrade(config, "head")
+        command.check(config)
+
+
+def test_persistent_borrow_migration_preserves_open_and_returned_history(empty_db_engine):
+    with empty_db_engine.begin() as connection:
+        config = migration_config()
+        config.attributes["connection"] = connection
+        command.upgrade(config, "0004_devices")
+        with Session(connection) as db:
+            user = add_user(db)
+            first, second = add_robot(db), add_robot(db)
+            now = datetime.now(UTC)
+            opened = lease(user.id, first.id)
+            returned = lease(
+                user.id, second.id, started_at=now - timedelta(seconds=10), ended_at=now
+            )
+            db.add_all([opened, returned])
+            db.flush()
+            opened_id, returned_id = opened.id, returned.id
+            returned_expiry = returned.expires_at
+            db.commit()
+        command.upgrade(config, "head")
+        with Session(connection) as db:
+            assert db.get(ControlSession, opened_id).expires_at is None
+            assert db.get(ControlSession, opened_id).ended_at is None
+            assert db.get(ControlSession, returned_id).expires_at == returned_expiry
+            assert db.get(ControlSession, returned_id).ended_at is not None
+        command.downgrade(config, "0004_devices")
+        with Session(connection) as db:
+            assert db.get(ControlSession, opened_id).expires_at is not None
         command.upgrade(config, "head")
         command.check(config)
 

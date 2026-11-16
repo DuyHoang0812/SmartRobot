@@ -124,7 +124,8 @@ describe('Authentication UI', () => {
     const button = await screen.findByRole('button', { name: 'Đăng xuất' })
     fetchMock.mockRejectedValue(new TypeError('Network failure'))
     await userEvent.click(button)
-    expect(await screen.findByRole('alert')).toHaveTextContent('Không thể kết nối')
+    // Robot polling may also fail; target the logout error instead of assuming a single alert.
+    expect(await screen.findByText('Không thể kết nối. Vui lòng thử lại.')).toHaveAttribute('role', 'alert')
     expect(screen.getByRole('heading', { name: 'Xe robot' })).toBeInTheDocument()
   })
 

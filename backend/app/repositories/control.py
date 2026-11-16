@@ -77,25 +77,17 @@ class ControlRepository:
             Robot.last_seen_at < now - timedelta(seconds=offline_seconds),
             Robot.last_seen_at > now,
         )
-        needs_lease = exists(
-            select(ControlSession.id).where(
-                ControlSession.robot_id == Robot.id,
-                ControlSession.auth_session_id.is_not(None),
-                ControlSession.ended_at.is_(None),
-                or_(ControlSession.expires_at <= now, offline),
-            )
-        )
         needs_command = exists(
             select(RobotCommand.id).where(
                 RobotCommand.robot_id == Robot.id,
                 RobotCommand.status.in_(ACTIVE_COMMANDS),
-                RobotCommand.expires_at <= now,
+                or_(RobotCommand.expires_at <= now, offline),
             )
         )
         return list(
             self.db.scalars(
                 select(Robot.id)
-                .where(or_(needs_lease, needs_command))
+                .where(needs_command)
                 .order_by(Robot.id)
                 .limit(100)
                 .with_for_update(skip_locked=True)

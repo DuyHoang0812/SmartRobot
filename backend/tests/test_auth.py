@@ -64,7 +64,8 @@ def auth_client(db_engine, auth_settings, accounts):
     )
 
     def override_db():
-        with Session(db_engine) as db:
+        # Match production: automatic expiration can hide missing ORM-attribute serialization.
+        with Session(db_engine, expire_on_commit=False) as db:
             yield db
 
     application.dependency_overrides[get_db] = override_db

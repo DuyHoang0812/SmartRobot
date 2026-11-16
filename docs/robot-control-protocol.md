@@ -72,26 +72,26 @@ GET state/session trên robot inactive trả 404. Release lại lease đã đón
 
 ## 3. Lease và concurrency
 
-Lease mặc định 10 giây. UI renew theo `renew_after_ms = min(2000, MODE_COMMAND_TTL_MS / 2)`
-(mặc định 1500 ms), không renew chỉ vì trang Dashboard đang mở. Secret chỉ ở memory của
-trang điều khiển, không lưu browser storage hoặc Query cache. Reload/rời trang không tự
-chiếm lại lease. Khi mất lease cần chủ động Nhận điều khiển lại.
+Lượt mượn không có thời hạn (`expires_at=null`). Chỉ thao tác **Trả xe** đóng lượt mượn
+trong sử dụng bình thường. Disable user/robot hoặc đổi credential vẫn là thu hồi quản trị.
+`CONTROL_LEASE_SECONDS` được giữ để tương thích cấu hình cũ, không giới hạn lượt mượn mới.
 
-Acquire khóa hàng Robot, đóng lease cũ hết hạn trước INSERT; partial unique index hiện có
-chỉ cho một lease chưa đóng/robot. Ghi lệnh khóa user, auth session, robot, lease và runtime
-theo thứ tự nhất quán. Sequence tăng trong transaction; Move/Stop/Release/Mode được tuần tự
-hóa trên PostgreSQL. Hai user tranh lease chỉ một người thành công.
+UI gọi renew theo `renew_after_ms = min(2000, MODE_COMMAND_TTL_MS / 2)` (mặc định 1500 ms)
+để duy trì Auto permit và phục hồi handoff của mode đang chọn khi thiết bị kết nối lại. Renew trễ,
+Offline, WebSocket ngắt, rời trang, logout hoặc lỗi thiết bị dừng/fence chuyển động nhưng
+không trả xe. Auth session hết hạn vẫn không cho phép gửi lệnh; người dùng đăng nhập lại
+bằng cùng tài khoản để tiếp tục lượt mượn.
 
-Lease đóng khi release, timeout, Offline, robot/user bị disable, rotate credential, auth
-session bị revoke (logout/password reset/refresh reuse), hoặc WebSocket của cùng phiên bị
-ngắt. Trigger PostgreSQL đóng lease khi revoke auth và vô hiệu hóa lệnh khi `ended_at`
-được đặt; không phụ thuộc vào đóng tab. Revoke một auth family không đóng các family khác.
+Acquire khóa Robot và chỉ cho một lượt mượn chưa đóng/robot. Người khác nhận 409. Cùng
+người mượn gọi acquire để lấy lại quyền sau reload/login: giữ ID lượt mượn, đổi secret và
+binding phiên đăng nhập, reset client_sequence, tăng generation và yêu cầu Manual an toàn.
+Secret chỉ nằm trong memory, không ghi browser storage hoặc Query cache. Credential cũ
+không còn dùng được. UI tự phục hồi lượt mượn đã thuộc tài khoản, không chiếm xe người khác.
 
-Sweeper mỗi giây xử lý tối đa 100 robot cần cleanup bằng SKIP LOCKED; API đọc/ghi cũng kiểm
-tra lại hạn ngay, không chờ sweeper. Device adapter kiểm tra hạn/fence trước trả lệnh.
-Auth hết hạn cũng được kiểm tra trước cho lệnh; lease tối đa theo expiry hiện tại nếu không
-có request nào nữa. Lease cũ không gắn auth session từ schema trước không được dùng để điều
-khiển và bị đóng khi truy cập control service.
+PostgreSQL row locks/unique constraints tuần tự hóa Move/Stop/Return/Mode. Trigger thu hồi
+auth session vô hiệu hóa lệnh và tăng generation, giữ lượt mượn. Trigger ended_at chỉ
+đóng quyền khi trả xe hoặc thao tác quản trị. Sweeper xử lý lệnh quá TTL/Offline, không
+thu hồi lượt mượn do không hoạt động.
 
 ## 4. Ordering, TTL và replay
 
@@ -105,9 +105,9 @@ khiển và bị đóng khi truy cập control service.
   Sau khi prune, high-water mark vẫn từ chối replay. Retry cùng thao tác phải giữ key/số.
 - Lệnh mới thay thế lệnh hiện hành; không có hàng đợi chuyển động để phát lại sau reconnect.
 - Manual MOVE và STOP TTL mặc định 700 ms, cấu hình 300–1500 ms. MODE/KEEPALIVE mặc định
-  3000 ms, cấu hình 2000–5000 ms. Lệnh không-STOP không được sống lâu hơn lease.
-- Hết TTL của chuyển mode chưa xác nhận hoặc Auto permit đóng lease. Manual đã xác nhận
-  khi đứng yên vẫn giữ lease đến hạn/renew, dù MODE cũ đã hết TTL. Hết MOVE không duy trì
+  3000 ms, cấu hình 2000–5000 ms. Lượt mượn vô hạn không làm TTL lệnh dài hơn.
+- Hết TTL của chuyển mode chưa xác nhận hoặc Auto permit dừng/fence chuyển động, giữ lượt mượn.
+  Manual đã xác nhận khi đứng yên vẫn giữ lượt mượn dù MODE cũ đã hết TTL. Hết MOVE không duy trì
   chuyển động; thiết bị phải dừng, có thể nhận MOVE mới hợp lệ trong cùng lease.
 - Lịch sử mặc định tối đa 1000 lệnh/robot; prune khi ghi, dọn lệnh kết thúc cũ hơn 7 ngày
   theo batch 1000. Không xóa sequence/generation khi dọn lịch sử.
@@ -129,10 +129,13 @@ Control POST có timeout 900 ms; có thể có khoảng dừng khi network chậ
 kéo dài TTL để che lỗi mạng. Stop vô hiệu hóa move đang chờ ngay, rồi gửi sau request đang
 bay; backend high-water mark/generation tiếp tục chặn thứ tự cũ khi request mạng đảo thứ tự.
 
-Nhả nút dừng chuyển động nhưng giữ lease. Blur, tab ẩn, mất WebSocket, lệnh lỗi, timeout
-lease, logout hoặc unmount ngừng refresh, cố gắng STOP/release. Response acquire đến muộn
-sau khi trang bị đóng/mất focus cũng được release. Không coi request cleanup là bảo đảm
-vật lý; TTL và watchdog firmware phải có hiệu lực khi request không tới backend/thiết bị.
+Nhả nút dừng chuyển động nhưng giữ lượt mượn. Blur/tab ẩn chỉ ngừng Manual intent đang giữ,
+không gửi STOP khi đang Auto hoặc đứng yên. Auto tiếp tục nhận permit khi trang/WS/renew
+còn hoạt động. Mất WS, unmount hoặc lỗi mạng ngừng cấp permit; backend fence và watchdog
+dừng chuyển động, giữ lựa chọn mode để handoff lại khi người mượn renew sau reconnect.
+Logout gửi STOP và thu hồi phiên đăng nhập, không gọi release. Response acquire
+đến sau unmount được STOP nhưng giữ lượt mượn để cùng tài khoản lấy lại khi mở trang.
+Chỉ bấm **Trả xe** mới gọi release. TTL/watchdog vẫn dừng output khi request cleanup không tới.
 
 ## 6. Mode switching và Auto permit
 
@@ -151,13 +154,13 @@ Sau Auto được xác nhận, renew phát KEEPALIVE/AUTO có TTL ngắn; firmwa
 MODE/permit còn hợp lệ. Direction STOP trong MODE/KEEPALIVE không phải một lệnh chạy thẳng:
 firmware xử lý theo kind/mode, dừng an toàn lúc handoff rồi mới cho thuật toán Auto chạy
 trong permit. Permit hết hạn/null/fence đổi phải hủy Auto, dừng; không tự chạy lại thuật toán
-cũ. Backend đóng lease khi permit hết hạn, cần acquire mới.
+cũ. Backend giữ lượt mượn khi permit hết hạn; renew phục hồi handoff mode đang chọn trước khi nhận lệnh mới; mọi permit đều mới và hữu hạn.
 
 ## 7. Trạng thái cảm biến, vật cản và Buzzer
 
 ControlState trả `requested_mode`, `actual_mode`, `mode_pending`, `actual_movement`,
 `obstacle`, `distance_cm`, `buzzer`, `reported_at`, `telemetry_fresh`, sequence/generation,
-status, server_time và lease. Command/ID lease chỉ trả cho đúng phiên sở hữu; không trả secret.
+status, server_time và lease. Command/ID lượt mượn chỉ trả cho tài khoản sở hữu; không trả secret.
 
 Actual fields chỉ được cập nhật từ adapter xác thực thiết bị. Chưa có báo cáo: null;
 UI hiển thị Chưa xác nhận/Chưa có dữ liệu/—. `telemetry_fresh` yêu cầu robot Online và báo
@@ -209,7 +212,7 @@ Backend đọc DB mỗi giây (cấu hình 0.1–2 giây); không cần sticky w
 Close codes: 4001 auth hết hạn/sai/thu hồi; 4003 robot không được truy cập; 1008 origin/query
 hoặc message policy; 1011 lỗi DB. Trước accept có thể thấy HTTP handshake rejection.
 Frontend refresh JWT qua client single-flight khi 4001; reconnect backoff 0.5→1→2→4→5 giây,
-không tự reconnect khi 4003/1008. Không nhận state/ping trong 4 giây thì ngắt và release.
+không tự reconnect khi 4003/1008. Không nhận state/ping trong 4 giây thì ngắt và STOP, giữ lượt mượn.
 Khi kết nối mới chưa nhận snapshot, controls vẫn khóa. Unmount đóng socket/timers; REST
 fallback đọc state mỗi 5 giây khi WS chưa kết nối, không làm quyền lái xe dựa trên polling.
 
@@ -218,14 +221,14 @@ fallback đọc state mỗi 5 giây khi WS chưa kết nối, không làm quyề
 `DeviceService` phục vụ `/api/v1/devices` theo [hợp đồng Device API](esp32-device-api.md).
 Tái dùng credential hash/rotation Phase 3 và ControlService Phase 5, khóa robot và tái kiểm
 tra lease/TTL trước trả lệnh. Mọi request có credential headers, sau authenticate có device
-session theo boot UUID. Auth/telemetry/poll không thay heartbeat. Reboot mới thu hồi lease,
-fence thế hệ cũ, xóa actual state cached, giữ Offline cho tới heartbeat hợp lệ.
+session theo boot UUID. Auth/telemetry/poll không thay heartbeat. Reboot mới giữ lượt mượn,
+fence lệnh thế hệ cũ, xóa actual state cached, giữ Offline cho tới heartbeat hợp lệ.
 
 - GET commands/current trả desired mode, mode_pending, control_authorized,
   authorization_expires_at, lease_expires_at, server seq/gen, command|null, fail_safe=STOP.
 - ACK RECEIVED/APPLIED/REJECTED/FAILED lưu timestamp/hash, không ACK chỉ vì poll. Duplicate
   đúng body trả receipt cũ, không cập nhật state/timestamp; không thể ghi đè lệnh mới.
-  REJECTED/FAILED đóng lease. Safe handoff không suy diễn khoảng cách/Buzzer.
+  REJECTED/FAILED dừng/fence chuyển động, giữ lượt mượn. Safe handoff không suy diễn khoảng cách/Buzzer.
 - Telemetry có sample_sequence theo boot, sequence high-water đã thấy và generation hiện
   tại, actual mode/movement, obstacle, distance, Buzzer. Lưu PostgreSQL, rate limit 5 Hz mặc
   định, retention 7 ngày/10000 mẫu mỗi robot. Duplicate không làm mới telemetry freshness.
@@ -244,3 +247,7 @@ TTL hết phải chuyển động cơ về trạng thái an toàn tại ESP32. T
 từ thời điểm nhận duplicate. Polling phải đủ nhanh so với TTL (dự kiến khoảng 100 ms),
 không làm mới thời hạn nếu nhận lại cùng sequence. Các chi tiết mạng/clock và driver vật
 lý cần kiểm thử trên ESP32 ở Phase 6B; Phase 6A chưa thể chứng minh thời gian dừng động cơ.
+
+Bản sửa 6b-4 về relay cấp nguồn motor, Auto và timeout: [motor-power-relay-and-auto-recovery.md](fixes/motor-power-relay-and-auto-recovery.md).
+
+Firmware 6b-5 dùng trạng thái lượt mượn riêng để giữ relay cấp nguồn; Manual STOP/idle chỉ dừng PWM. Device envelope mang `control_session_id` kể cả command=null. Xem [relay theo lượt mượn](fixes/borrow-powered-relay.md).

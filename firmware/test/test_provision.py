@@ -46,7 +46,10 @@ class ProvisionTests(unittest.TestCase):
                 )
         provision.rows_from_config(
             self.config()
-            | {"backend_url": "http://192.168.1.10:8000/api/v1/devices", "allow_http_lan": True},
+            | {
+                "backend_url": "http://192.168.1.10:8000/api/v1/devices",
+                "allow_http_lan": True,
+            },
             ROOT,
         )
 
@@ -63,9 +66,29 @@ class ProvisionTests(unittest.TestCase):
             ("blind_manual_max_ms", 500),
             ("http_timeout_ms", 1000),
             ("full_speed", True),
+            ("left_motor_percent", 49),
+            ("right_motor_percent", 151),
+            ("right_motor_percent", 83.55),
+            ("right_motor_percent", float("nan")),
+            ("right_motor_percent", True),
+            ("auto_clearance_cm", 14),
+            ("auto_backup_ms", 401),
+            ("auto_turn_left_ms", 99),
+            ("auto_turn_right_ms", 1201),
         ]:
             with self.assertRaises(ValueError):
                 provision.rows_from_config(self.config() | {field: value}, ROOT)
+
+    def test_motor_trim_and_auto_defaults_and_nvs_types(self):
+        values = {
+            r[0]: (r[2], r[3]) for r in provision.rows_from_config(self.config(), ROOT)
+        }
+        self.assertEqual(values["left_pct10"], ("u32", 1000))
+        self.assertEqual(values["right_pct10"], ("u32", 835))
+        self.assertEqual(values["auto_clear"], ("u32", 15))
+        self.assertEqual(values["auto_back_ms"], ("u32", 400))
+        self.assertEqual(values["trim_rev"], ("u8", 16))
+        self.assertEqual(values["auto_rev"], ("u8", 10))
 
     def test_official_nvs_generator_produces_private_image_without_leaking_values(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -74,14 +97,23 @@ class ProvisionTests(unittest.TestCase):
             config.write_text(json.dumps(self.config()))
             out = folder / "test.bin"
             result = subprocess.run(
-                [sys.executable, str(ROOT / "tools/provision.py"), str(config), "--out", str(out)],
+                [
+                    sys.executable,
+                    str(ROOT / "tools/provision.py"),
+                    str(config),
+                    "--out",
+                    str(out),
+                ],
+                check=False,
                 capture_output=True,
                 text=True,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(out.stat().st_size, 65536)
             self.assertEqual(stat.S_IMODE(out.stat().st_mode), 0o600)
-            self.assertNotIn(self.config()["device_secret"], result.stdout + result.stderr)
+            self.assertNotIn(
+                self.config()["device_secret"], result.stdout + result.stderr
+            )
             self.assertEqual(list(folder.glob("*.csv")), [])
 
 

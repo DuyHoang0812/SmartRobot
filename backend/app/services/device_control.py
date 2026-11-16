@@ -92,7 +92,7 @@ class DeviceControlService:
         state.reported_at = ctx.now
         state.last_report_sequence = report.sequence
         if report.acknowledgement == "REJECTED":
-            self.control._end(ctx)
+            self.control._halt(ctx)
             self.db.commit()
             return
         if (

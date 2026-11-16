@@ -6,8 +6,8 @@ Nền tảng quản lý robot ESP32. Đã triển khai **Phase 1 — Backend Fou
 **Phase 6A — Real ESP32 Device Communication**.
 Admin có quản lý tài khoản/robot; USER có Dashboard, trang điều khiển, control lease và
 WebSocket trạng thái và HTTP Device API cho nhiều ESP32 thật. Không có Robot Simulator.
-Firmware/PlatformIO setup thuộc Phase 6B do nhóm phần cứng thực hiện.
-Firmware hiện có được giữ nguyên và không nằm trong phạm vi phát triển web.
+Firmware ESP-IDF native Phase 6B đã triển khai đầy đủ module và build cho ESP32 Flash4MB;
+chưa flash hoặc kiểm chứng xe thật. Xem [firmware README](firmware/README.md).
 
 ## Môi trường
 
@@ -128,7 +128,7 @@ kết nối/lease hiện tại; sửa riêng tên xe giữ nguyên thông tin k�
 
 Robot mới luôn Offline. Online yêu cầu heartbeat thực tế trong
 `ROBOT_OFFLINE_AFTER_SECONDS` (mặc định 15 giây), active và timestamp không ở tương lai.
-Busy yêu cầu thêm một lease chưa đóng, đã bắt đầu, chưa hết hạn và chủ sở hữu đang active.
+Busy yêu cầu thêm một lượt mượn chưa đóng, đã bắt đầu và chủ sở hữu đang active; lượt mượn mới không hết hạn.
 Admin UI làm mới trạng thái mỗi 15 giây và có nút Làm mới. Chưa có heartbeat API ở Phase 3,
 vì vậy robot mới vẫn Offline cho tới khi Device API được triển khai.
 
@@ -200,17 +200,18 @@ Hướng dẫn nghiệm thu và các phần chưa kiểm chứng: [Báo cáo Pha
 ## Điều khiển và realtime
 
 Mở `/robots/:id`, chọn **Nhận điều khiển** khi xe Online và chưa có lease. Một robot chỉ
-có một lease, gắn với đúng phiên đăng nhập. Lease mặc định 10 giây, UI renew theo khoảng
-backend trả về (mặc định 1,5 giây). Khi nhận lease, backend yêu cầu thiết bị xác nhận Manual
+có một lượt mượn, giữ cho tài khoản đến khi bấm **Trả xe** (`expires_at=null`). UI renew
+theo khoảng backend trả về (mặc định 1,5 giây) để duy trì Auto permit, không gia hạn lượt mượn. Khi nhận lease, backend yêu cầu thiết bị xác nhận Manual
 an toàn; chưa có xác nhận thì D-Pad bị khóa. Device API Phase 6A nhận ACK từ ESP32.
 
 D-Pad chỉ gồm **Tiến, Lùi, Quay trái, Quay phải**; hỗ trợ chuột, cảm ứng, WASD và phím mũi tên.
 Giữ nút gửi lệnh tuần tự, tối đa khoảng 4 lần/giây; nhả nút gửi STOP nội bộ. Không có nút Stop
 hoặc Emergency Stop. Manual/Auto chỉ thể hiện yêu cầu; chế độ và chuyển động thiết bị chỉ
-được hiển thị từ báo cáo đã xác thực của thiết bị. **Thoát điều khiển** gửi STOP rồi release.
+được hiển thị từ báo cáo đã xác thực của thiết bị. **Trả xe** gửi STOP rồi release. Tín hiệu động cơ là trạng thái đầu ra điện; xe chưa có encoder xác nhận bánh quay.
 
-Mất focus, tab ẩn, mất WebSocket, lỗi lệnh, hết lease, logout hoặc rời trang sẽ ngừng refresh
-chuyển động và cố gắng STOP/release. TTL lệnh Manual mặc định 700 ms; không phụ thuộc vào
+Mất focus, tab ẩn, mất WebSocket, lỗi lệnh, logout hoặc rời trang sẽ ngừng refresh
+chuyển động và cố gắng STOP, vẫn giữ lượt mượn. Reload/login cùng tài khoản tự lấy lại quyền,
+đổi secret để chặn credential cũ và yêu cầu handoff Manual an toàn. TTL lệnh Manual mặc định 700 ms; không phụ thuộc vào
 cleanup frontend để chống lệnh tồn tại vô hạn. Auto dùng permit ngắn hạn, TTL mặc định 3 giây.
 Firmware tương lai bắt buộc có watchdog cục bộ; backend không thể xác nhận động cơ dừng khi
 chưa có ESP32 báo trạng thái thực tế. Không suy diễn khoảng cách, vật cản hoặc Buzzer từ thao tác người dùng.
@@ -225,12 +226,12 @@ chưa có ESP32 báo trạng thái thực tế. Không suy diễn khoảng cách
 REST dùng Bearer JWT, các thao tác sau acquire còn cần ID/secret của lease. Lease secret chỉ
 ở memory; lệnh dùng UUID `request_id` và `client_sequence` để chống lặp/sai thứ tự. PostgreSQL
 row locks, sequence/generation và unique constraints điều phối Move/Stop/Release/Mode.
-Logout, vô hiệu hóa hoặc xoay credential sẽ đóng lease và vô hiệu hóa lệnh cũ trong database.
+Logout vô hiệu hóa lệnh cũ, giữ lượt mượn. Vô hiệu hóa user/robot hoặc xoay credential vẫn thu hồi quyền quản trị.
 
 WebSocket `/api/v1/ws/robots/{id}` xác thực bằng frame đầu tiên; không có token trên URL.
 Origin phải nằm trong `CORS_ORIGINS`. Backend gửi snapshot `robot.state` hoặc `ping` mỗi giây,
 đọc PostgreSQL để hoạt động được với nhiều workers. UI reconnect có backoff, khóa điều khiển
-trong lúc mất kết nối và không tự chiếm lại lease. Vite proxy đã bật WebSocket; production
+trong lúc mất kết nối, giữ lượt mượn và reconnect để tiếp tục. Vite proxy đã bật WebSocket; production
 reverse proxy cần hỗ trợ Upgrade và HTTPS/WSS. Không ghi auth frames vào proxy/application logs.
 
 Migration mới **0003_control** kế thừa **0002_auth**: hai bảng control state/commands, auth
@@ -263,12 +264,11 @@ kết nối không tiếp tục trình bày sensor/ACK cached như trạng thái
 
 Heartbeat mặc định 2 giây, timeout 15 giây; command polling 100 ms. Telemetry tối đa 5 Hz
 mặc định, retry duplicate không ghi thêm hoặc làm mới timestamp. Lưu tối đa 10000 mẫu/robot
-và dọn mẫu cũ hơn 7 ngày theo batch. Reboot/session mới hủy lease/lệnh cũ, cần handshake lại.
+và dọn mẫu cũ hơn 7 ngày theo batch. Reboot/session mới giữ lượt mượn và mode đang chọn, hủy lệnh cũ và yêu cầu handoff mới qua renew của người mượn.
 Credential rotation/disable thu hồi cả device session. Không trả lệnh thuộc lease đã đóng,
 kể cả STOP cũ; envelope `command=null`, `control_authorized=false` bắt buộc firmware dừng/hủy Auto.
 
-Migration hiện tại **0004_devices** thêm device sessions, ACK và telemetry metadata, giữ
-nguyên dữ liệu/migrations cũ. Chạy `uv run alembic upgrade head` trước khi chạy phiên bản này.
+Migration hiện tại **0005_persistent_borrow** cho phép lượt mượn không hết hạn và đổi trigger logout thành dừng lệnh, giữ lượt mượn. Các lượt mượn đang mở được chuyển sang `expires_at=null`. Chạy `uv run alembic upgrade head` trước khi chạy phiên bản này.
 
 Mặc định Device API yêu cầu HTTPS; ESP32 phải kiểm tra CA và hostname chứng chỉ server.
 Production không chấp nhận `DEVICE_ALLOW_INSECURE_HTTP=true`. Chỉ khi phát triển trong LAN
@@ -288,6 +288,12 @@ Thông số cần nhập vào firmware: Wi-Fi SSID/password, base URL laptop (kh
 trên ESP32), CA/hostname, Device ID/secret lưu bảo mật, boot UUID mới, sequence/session và
 timers theo response. Watchdog/motor/sensor/servo/Buzzer do Phase 6B thực hiện.
 Không tạo project PlatformIO hoặc firmware trong Phase 6A.
+
+Firmware **Phase 6B** hiện dùng project PlatformIO đã có: Wi-Fi Station/HTTPS, session,
+heartbeat/poll/ACK/telemetry, L298N, HC-SR04, servo, Buzzer, relay, Manual/Auto state machine
+và watchdog. GPIO giữ theo file .ino; cấu hình riêng trong NVS, mặc định motor chưa armed.
+Hướng dẫn cấu hình/upload/monitor và giới hạn phần cứng tại [firmware/README.md](firmware/README.md),
+kết quả build/kiểm thử tại [báo cáo Phase 6B](docs/phase-6b-report.md).
 
 Hợp đồng JSON đầy đủ, lỗi/retry/reboot và curl:
 [ESP32 Device API](docs/esp32-device-api.md).
@@ -379,3 +385,38 @@ Dashboard và trang chi tiết xe:
 
 Device Communication với ESP32 thật:
 [Báo cáo Phase 6A](docs/phase-6a-report.md), [ESP32 Device API](docs/esp32-device-api.md).
+
+Bản sửa firmware **6b-4**: relay GPIO26 cấp nguồn motor tự động, giữ Auto qua khôi phục mạng và retry HTTP: [chi tiết cập nhật/nghiệm thu](docs/fixes/motor-power-relay-and-auto-recovery.md).
+
+Firmware **6b-5** giữ relay GPIO26 ON suốt lượt mượn, kể cả Manual idle/STOP và đổi mode; trả xe hoặc lỗi an toàn mới cắt nguồn. Cần backend mới có borrow ID trong snapshot idle: [hướng dẫn cập nhật](docs/fixes/borrow-powered-relay.md).
+
+Firmware **6b-6** sửa Auto dừng vĩnh viễn sau khi quét vật cản: chọn hướng từ ngưỡng15cm,
+đo lại sau quay và tiếp tục kiểm tra/quét khi bị chắn: [hướng dẫn Auto](docs/fixes/auto-obstacle-recovery.md).
+
+Firmware **6b-7** sửa chiều quay theo OUT1/2 phải, OUT3/4 trái; Auto quét/rẽ/lùi tìm đường và cân PWM từng bánh qua Serial `trim`: [hướng dẫn cập nhật/cân bánh](docs/fixes/auto-backup-and-wheel-trim.md).
+
+**6b-8** đảo lại pivot trái/phải của 6b-7 theo thử nghiệm thực tế người dùng báo; giữ nguyên tiến/lùi, trim và thuật toán Auto.
+
+**6b-9** sửa Auto thành quét hai bên → chọn lối → lùi một lần → quay đúng lối đã chọn;
+chặn lặp lùi khi vẫn kẹt và qua MODE/khôi phục kết nối:
+[hướng dẫn cập nhật và kiểm thử](docs/fixes/auto-commit-backup-turn.md).
+
+**6b-10** đối chiếu Auto với `ver2_6_esp32.ino`: ngưỡng rẽ15cm, lùi400ms, quay400ms,
+hãm100ms trước/sau quay; giảm mức bù trái xuống85% để tiếp tục cân xe lệch phải.
+Nhận diện bộ mặc định cũ trong NVS để áp dụng khi chỉ nạp app:
+[chi tiết cập nhật](docs/fixes/auto-ver2_6-and-right-drift.md).
+
+**6b-11** đặt trim trái100%/phải80% và sửa nhánh Auto không lùi khi cả hai bên chưa có lối:
+lùi một lần rồi quét lại, tìm được hướng mới quay; vẫn chặn lùi liên tục.
+[Chi tiết](docs/fixes/auto-backup-without-exit.md).
+
+**6b-12** đặt trim trái100%/phải82%; Auto chốt hướng trước lùi, hết thời gian lùi
+chuyển ngay sang quay dù phía trước vẫn dưới15cm. Không quét lại ở giữa:
+[chi tiết](docs/fixes/auto-immediate-turn.md).
+
+**6b-13** đặt trim trái100%/phải83,5%, hỗ trợ lưu hệ số thập phân. Servo quét chậm,
+dừng ở từng bên lấy3 mẫu; chỉ quay về bên đủ trống, hai bên kín thì lùi lâu hơn và quét lại:
+[chi tiết](docs/fixes/auto-slow-scan-side-turn.md).
+
+**6b-14** chuyển Auto về logic ver2_6 (ưu tiên trái, lùi/hãm/quay và heuristic3 giây),
+tích hợp với mode/permit/relay của web: [chi tiết](docs/fixes/auto-reference-web.md).

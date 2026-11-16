@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import case, exists, select
+from sqlalchemy import case, exists, or_, select
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -30,7 +30,7 @@ class RobotStatusService:
                 ControlSession.robot_id == Robot.id,
                 ControlSession.ended_at.is_(None),
                 ControlSession.started_at <= now,
-                ControlSession.expires_at > now,
+                or_(ControlSession.expires_at.is_(None), ControlSession.expires_at > now),
             )
         )
         return case(

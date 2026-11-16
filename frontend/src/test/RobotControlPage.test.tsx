@@ -10,7 +10,6 @@ import type { ControlState } from '../types/control'
 
 let current: ControlState
 let fetchMock = vi.fn<typeof fetch>()
-const expires = () => new Date(Date.now() + 10000).toISOString()
 const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200 })
 
 beforeEach(() => {
@@ -22,10 +21,10 @@ beforeEach(() => {
     const path = String(url)
     if (path.endsWith('/control/state')) return json({ ...current, server_time: new Date().toISOString() })
     if (path.endsWith('/acquire')) {
-      current = { ...current, lease: { id: 'lease', owned: true, expires_at: expires() } }
+      current = { ...current, lease: { id: 'lease', owned: true, expires_at: null } }
       return json({ ...current.lease, lease_token: 'secret-memory-only', renew_after_ms: 2000 })
     }
-    if (path.endsWith('/renew')) return json({ ...current.lease, expires_at: expires() })
+    if (path.endsWith('/renew')) return json({ ...current.lease, expires_at: null })
     if (path.endsWith('/release')) {
       current = { ...current, lease: { id: null, owned: false, expires_at: null } }
       return new Response(null, { status: 204 })
@@ -63,7 +62,7 @@ it('renders four disabled directions until a valid lease is acquired', async () 
   expect(within(screen.getByRole('group', { name: 'Điều khiển Manual' })).getAllByRole('button')).toHaveLength(4)
   expect(screen.queryByRole('button', { name: /Dừng khẩn cấp|^Dừng$/ })).not.toBeInTheDocument()
   await own()
-  expect(screen.getByRole('button', { name: 'Thoát điều khiển' })).toBeEnabled()
+  expect(screen.getByRole('button', { name: 'Trả xe' })).toBeEnabled()
 })
 
 it('does not claim actual movement from an accepted move', async () => {
@@ -84,15 +83,29 @@ it('requests Auto and keeps controls disabled while waiting for the device', asy
   expect(screen.getByRole('button', { name: 'Manual' })).toBeDisabled()
 })
 
+it('does not send a late Stop after switching to Auto while a key was held', async () => {
+  await mount(); await own()
+  fireEvent.keyDown(window, { key: 'w' })
+  await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/move'))).toBe(true))
+  await userEvent.click(screen.getByRole('button', { name: 'Auto' }))
+  await screen.findByText('Chờ thiết bị')
+  fireEvent.keyUp(window, { key: 'w' })
+  await act(async () => { await Promise.resolve() })
+  const paths = fetchMock.mock.calls.map(([url]) => String(url).split('/').at(-1))
+  const modeIndex = paths.indexOf('mode')
+  expect(modeIndex).toBeGreaterThan(-1)
+  expect(paths.slice(modeIndex + 1)).not.toContain('stop')
+})
+
 it('releases control explicitly', async () => {
   await mount(); await own()
-  await userEvent.click(screen.getByRole('button', { name: 'Thoát điều khiển' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Trả xe' }))
   await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/release'))).toBe(true))
   expect(screen.getByRole('button', { name: 'Tiến' })).toBeDisabled()
 })
 
 it.each(['OFFLINE', 'BUSY'] as const)('disables controls when robot is %s', async (status) => {
-  current = { ...current, status, lease: status === 'BUSY' ? { id: null, owned: false, expires_at: expires() } : current.lease }
+  current = { ...current, status, lease: status === 'BUSY' ? { id: null, owned: false, expires_at: null } : current.lease }
   await mount()
   expect(screen.getByRole('button', { name: 'Tiến' })).toBeDisabled()
   expect(screen.getByRole('button', { name: 'Nhận điều khiển' })).toBeDisabled()
@@ -108,20 +121,21 @@ it('shows only device-provided obstacle and sensor data', async () => {
   expect(await screen.findByText('Lỗi cảm biến')).toBeInTheDocument()
 })
 
-it('stops and releases when the WebSocket disconnects', async () => {
+it('stops and keeps the borrow when the WebSocket disconnects', async () => {
   await mount(); await own()
   fireEvent.keyDown(window, { key: 'w' })
   await act(async () => FakeRobotSocket.instances[0].disconnect())
-  await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/release'))).toBe(true))
+  await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/stop'))).toBe(true))
   expect(screen.getByRole('button', { name: 'Tiến' })).toBeDisabled()
 })
 
-it('stops and releases on blur and component unmount', async () => {
+it('stops and keeps the borrow on blur and component unmount', async () => {
   const view = await mount(); await own()
   fireEvent.keyDown(window, { key: 'w' })
   fireEvent.blur(window)
-  await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/release'))).toBe(true))
+  await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/stop'))).toBe(true))
   view.unmount()
+  expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/release'))).toBe(false)
 })
 
 it('shows device acknowledgement from WebSocket and clears live claims on disconnect', async () => {

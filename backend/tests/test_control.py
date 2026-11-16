@@ -102,7 +102,8 @@ def test_acquire_is_exclusive_and_unknown_state_is_not_execution(rig):
     grant = acquire(rig)
     assert grant["owned"] and len(grant["lease_token"]) >= 64
     assert grant["renew_after_ms"] <= rig["settings"].mode_command_ttl_ms // 2
-    assert rig["client"].post(rig["base"] + "/acquire").status_code == 409
+    resumed = acquire(rig)
+    assert resumed["id"] == grant["id"] and resumed["lease_token"] != grant["lease_token"]
     state = rig["client"].get(rig["base"] + "/state").json()
     assert state["actual_mode"] is None and state["actual_movement"] is None
     assert state["mode_pending"] and state["command"]["status"] == "ACCEPTED"
@@ -117,9 +118,7 @@ def test_renew_and_release(rig):
     lease_body = {"control_session_id": grant["id"], "lease_token": grant["lease_token"]}
     renewed = rig["client"].post(rig["base"] + "/renew", json=lease_body)
     assert renewed.status_code == 200
-    assert datetime.fromisoformat(renewed.json()["expires_at"]) >= datetime.fromisoformat(
-        grant["expires_at"]
-    )
+    assert renewed.json()["expires_at"] is None and grant["expires_at"] is None
     assert rig["client"].post(rig["base"] + "/release", json=lease_body).status_code == 204
     assert not rig["client"].get(rig["base"] + "/session").json()["owned"]
     assert (
@@ -300,17 +299,58 @@ def test_manual_ttl_and_history_bounds(rig):
         assert db.scalar(select(func.count()).select_from(RobotCommand)) <= 10
 
 
-def test_lease_timeout_cleanup_and_reacquire(rig):
+def test_idle_borrow_survives_cleanup_and_same_user_can_resume(rig):
     grant = acquire(rig)
     with Session(rig["db"]) as db:
         lease = db.get(ControlSession, grant["id"])
-        lease.started_at = datetime.now(UTC) - timedelta(seconds=20)
-        lease.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        lease.started_at = datetime.now(UTC) - timedelta(days=2)
+        assert lease.expires_at is None
         db.commit()
         ControlService(db, rig["settings"]).cleanup()
-        assert db.get(ControlSession, grant["id"], populate_existing=True).ended_at is not None
+        assert db.get(ControlSession, grant["id"], populate_existing=True).ended_at is None
     second = acquire(rig)
-    assert second["id"] != grant["id"]
+    assert second["id"] == grant["id"]
+
+
+def test_new_login_can_resume_borrow_but_old_browser_credentials_are_fenced(rig):
+    grant = acquire(rig)
+    assert rig["client"].post("/api/v1/auth/logout", headers=csrf(rig["client"])).status_code == 204
+    access = bearer(login(rig["client"], "operator"))
+    state = rig["client"].get(rig["base"] + "/state", headers=access).json()
+    assert state["lease"]["id"] == grant["id"] and state["lease"]["owned"]
+    resumed = rig["client"].post(rig["base"] + "/acquire", headers=access)
+    assert resumed.status_code == 201
+    assert resumed.json()["id"] == grant["id"]
+    assert resumed.json()["lease_token"] != grant["lease_token"]
+    assert (
+        rig["client"].post(rig["base"] + "/stop", headers=access, json=payload(grant)).status_code
+        == 403
+    )
+    assert (
+        rig["client"]
+        .post(rig["base"] + "/stop", headers=access, json=payload(resumed.json()))
+        .status_code
+        == 202
+    )
+
+
+def test_borrower_can_resume_and_return_an_offline_robot(rig):
+    grant = acquire(rig)
+    with Session(rig["db"]) as db:
+        db.get(Robot, rig["robot_id"]).last_seen_at = None
+        db.commit()
+    resumed = acquire(rig)
+    assert resumed["id"] == grant["id"]
+    assert (
+        rig["client"]
+        .post(
+            rig["base"] + "/release",
+            json={"control_session_id": resumed["id"], "lease_token": resumed["lease_token"]},
+        )
+        .status_code
+        == 204
+    )
+    assert not rig["client"].get(rig["base"] + "/session").json()["owned"]
 
 
 def test_acknowledged_idle_manual_keeps_lease_after_mode_command_ttl(rig):
@@ -334,13 +374,13 @@ def test_acknowledged_idle_manual_keeps_lease_after_mode_command_ttl(rig):
     )
 
 
-def test_logout_revokes_lease_and_commands_in_database(rig):
+def test_logout_stops_commands_but_keeps_borrow_in_database(rig):
     grant = acquire(rig)
     acknowledge(rig)
     rig["client"].post(rig["base"] + "/move", json=payload(grant, direction="FORWARD"))
     assert rig["client"].post("/api/v1/auth/logout", headers=csrf(rig["client"])).status_code == 204
     with Session(rig["db"]) as db:
-        assert db.get(ControlSession, grant["id"]).ended_at is not None
+        assert db.get(ControlSession, grant["id"]).ended_at is None
         assert not list(
             db.scalars(select(RobotCommand).where(RobotCommand.status == CommandStatus.ACCEPTED))
         )
@@ -465,7 +505,7 @@ def test_websocket_authentication_and_reconnect(rig):
             assert "lease_token" not in str(event)
 
 
-def test_websocket_disconnect_releases_owned_lease(rig):
+def test_websocket_disconnect_keeps_owned_borrow_and_fences_motion(rig):
     grant = acquire(rig)
     with rig["client"].websocket_connect(
         f"/api/v1/ws/robots/{rig['robot_id']}", headers={"Origin": "http://localhost:5173"}
@@ -473,7 +513,10 @@ def test_websocket_disconnect_releases_owned_lease(rig):
         ws.send_json({"type": "authenticate", "access_token": rig["token"]})
         assert ws.receive_json()["data"]["lease"]["owned"]
     with Session(rig["db"]) as db:
-        assert db.get(ControlSession, grant["id"]).ended_at is not None
+        assert db.get(ControlSession, grant["id"]).ended_at is None
+    state = rig["client"].get(rig["base"] + "/state").json()
+    assert state["lease"]["owned"] and state["mode_pending"]
+    assert state["command"]["status"] == "SUPERSEDED"
 
 
 @pytest.mark.parametrize(
@@ -547,13 +590,13 @@ def test_unsafe_mode_acknowledgement_does_not_unlock_manual(rig):
     )
 
 
-def test_offline_cleanup_invalidates_a_live_lease(rig):
+def test_offline_cleanup_keeps_a_live_borrow(rig):
     grant = acquire(rig)
     with Session(rig["db"]) as db:
         db.get(Robot, rig["robot_id"]).last_seen_at = datetime.now(UTC) - timedelta(minutes=1)
         db.commit()
         ControlService(db, rig["settings"]).cleanup()
-        assert db.get(ControlSession, grant["id"], populate_existing=True).ended_at is not None
+        assert db.get(ControlSession, grant["id"], populate_existing=True).ended_at is None
 
 
 def test_websocket_delivers_lease_changes_and_checks_revocation(rig):

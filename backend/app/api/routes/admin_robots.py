@@ -42,7 +42,7 @@ def list_robots(
         page, page_size, q.strip(), is_active, status, AuthRepository(db).now()
     )
     return Page[RobotResponse](
-        items=[RobotResponse.model_validate({**r.__dict__, "status": s}) for r, s in rows],
+        items=[RobotManagementService.serialize(robot, status) for robot, status in rows],
         total=total,
         page=page,
         page_size=page_size,

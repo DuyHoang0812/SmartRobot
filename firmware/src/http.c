@@ -60,13 +60,18 @@ http_result_t http_request(const char *path, const char *body, const char *sessi
     uint32_t epoch = wifi_epoch();
     used = 0; overflow = false; retry_after = 0; response[0] = 0;
     if (esp_http_client_set_url(client, url) != ESP_OK) return r;
-    esp_http_client_set_timeout_ms(client, authenticating ? 5000 : (int)settings->http_timeout_ms);
+    int timeout = (int)settings->http_timeout_ms;
+    // A fresh GET/ACK round trip in the supplied logs exceeds 250ms. The motor watchdog
+    // still enforces the original command deadline independently of this socket wait.
+    if (timeout < 400) timeout = 400;
+    esp_http_client_set_timeout_ms(client, authenticating ? 5000 : timeout);
     esp_http_client_set_method(client, body ? HTTP_METHOD_POST : HTTP_METHOD_GET);
     esp_http_client_set_post_field(client, body ? body : "", body ? (int)strlen(body) : 0);
     if (session && session[0]) esp_http_client_set_header(client, "X-Device-Session", session);
     else esp_http_client_delete_header(client, "X-Device-Session");
     r.started_us = esp_timer_get_time();
     esp_err_t e = esp_http_client_perform(client);
+    r.error = e;
     r.finished_us = esp_timer_get_time();
     r.transport_ok = e == ESP_OK && !overflow && wifi_connected() && epoch == wifi_epoch();
     r.status = esp_http_client_get_status_code(client);

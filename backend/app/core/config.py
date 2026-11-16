@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     login_identity_limit: int = Field(default=10, ge=1, le=100)
     login_window_seconds: int = Field(default=300, ge=1, le=3600)
     robot_offline_after_seconds: int = Field(default=15, ge=1, le=300)
+    # Legacy configuration only: borrowing now lasts until explicit return.
     control_lease_seconds: int = Field(default=10, ge=5, le=60)
     manual_command_ttl_ms: int = Field(default=700, ge=300, le=1500)
     mode_command_ttl_ms: int = Field(default=3000, ge=2000, le=5000)

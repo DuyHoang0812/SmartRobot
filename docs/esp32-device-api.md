@@ -107,9 +107,9 @@ Response:
 }
 ```
 
-Authenticate không cập nhật heartbeat. Boot mới đóng device session cũ, hủy lease/lệnh
+Authenticate không cập nhật heartbeat. Boot mới đóng device session cũ, giữ lượt mượn và hủy lệnh
 cũ, tăng generation, xóa actual state cached và giữ Offline tới heartbeat. Sequence lệnh
-server không reset. Retry cùng boot đang active trả cùng session, không đóng lease lần nữa.
+server không reset. Retry cùng boot đang active trả cùng session, không fence lần nữa.
 Boot đã retired trả 409; request mang session cũ cũng 409. Muốn khởi tạo lại sau rotate/
 disable hoặc session retired: dừng, tạo boot UUID mới và authenticate lại bằng credential
 hiện hành. Không tự động resume Auto/lệnh cache sau reboot.
@@ -144,8 +144,8 @@ Response:
 
 Backend dùng giờ PostgreSQL UTC. Counter bằng lần gần nhất trả duplicate=true và giữ
 nguyên last_seen_at; counter nhỏ hơn trả 409. Replay heartbeat không kéo dài Online.
-Heartbeat trở lại sau Offline hủy lease cũ **trước** đánh dấu Online; cần user acquire
-mới. Heartbeat không gia hạn MOVE, Auto permit hoặc control lease. Authenticate/poll/ACK/
+Heartbeat trở lại sau Offline fence lệnh cũ **trước** đánh dấu Online; giữ lượt mượn.
+Renew từ người mượn sẽ yêu cầu handoff mode đang chọn mới khi cần. Heartbeat không gia hạn MOVE, Auto permit hoặc control lease. Authenticate/poll/ACK/
 telemetry không thay heartbeat.
 
 ## 5. Fetch current command và desired state
@@ -163,7 +163,7 @@ telemetry không thay heartbeat.
   "mode_pending": true,
   "control_authorized": true,
   "authorization_expires_at": "2026-11-15T16:00:05Z",
-  "lease_expires_at": "2026-11-15T16:00:12Z",
+  "lease_expires_at": null,
   "command": {
     "command_id": "44444444-4444-4444-8444-444444444444",
     "robot_id": "22222222-2222-4222-8222-222222222222",
@@ -184,9 +184,9 @@ telemetry không thay heartbeat.
 }
 ```
 
-Trường `authorization_expires_at` là min(command expiry, lease expiry), chỉ có khi command
-hợp lệ. Backend không trả lệnh hết TTL, sai generation/lease, robot Offline, lease hết
-hạn/thu hồi; không trả cả STOP thuộc lease đã đóng. Poll lặp trả cùng ID/sequence và expiry,
+Trường `lease_expires_at=null` biểu thị lượt mượn không hết hạn, kể cả khi đang authorized.
+`authorization_expires_at` vẫn bằng hạn command và bắt buộc hữu hạn. Backend không trả
+lệnh hết TTL, sai generation/lease, robot Offline hoặc lượt mượn đã trả/thu hồi; không trả cả STOP thuộc lease đã đóng. Poll lặp trả cùng ID/sequence và expiry,
 không đánh dấu RECEIVED/APPLIED và không làm mới TTL.
 
 Envelope idle không có lệnh, ví dụ sau release (sequence/generation thực tế sẽ khác):
@@ -280,8 +280,8 @@ Response:
 | --- | --- |
 | RECEIVED | Firmware nhận/parse lệnh; chưa xác nhận áp dụng |
 | APPLIED | Firmware đã chấp nhận áp dụng yêu cầu; không chứng minh xe đã di chuyển |
-| REJECTED | Firmware từ chối lệnh; backend thu hồi lease |
-| FAILED | Áp dụng thất bại; backend thu hồi lease |
+| REJECTED | Firmware từ chối lệnh; backend dừng/fence lệnh, giữ lượt mượn |
+| FAILED | Áp dụng thất bại; backend dừng/fence lệnh, giữ lượt mượn |
 
 MOVE/STOP Manual thông thường dùng safe_mode_switch=false, actual fields null/bỏ; báo
 actual movement qua telemetry riêng. MODE APPLIED khi đang pending bắt buộc safe handoff,
@@ -374,11 +374,11 @@ Firmware phải có watchdog độc lập với tác vụ HTTP, dùng clock mono
 4. Mất Wi-Fi/API, timeout, response lỗi/không parse được, null/không authorization, session/
    fence đổi, lease/TTL hết hoặc cảm biến lỗi: dừng/cancel theo chính sách an toàn cục bộ.
 5. Nếu Auto đã bị hủy do watchdog/mất kết nối, không chạy lại từ permit cache. Để re-arm
-   an toàn, giữ động cơ dừng, khởi tạo phiên giao thức mới bằng boot UUID mới; backend thu
-   hồi lease cũ và yêu cầu user acquire/safe handoff lại. Manual idle bình thường không
+   an toàn, giữ động cơ dừng, khởi tạo phiên giao thức mới bằng boot UUID mới; backend giữ
+   lượt mượn và yêu cầu safe handoff mode đang chọn mới qua renew từ người mượn. Manual idle bình thường không
    cần tạo boot mới; MOVE sequence mới có thể được xử lý trong lease hợp lệ.
 
-Đặt HTTP timeout ngắn so với TTL (dự kiến <=250 ms cho command polling với TTL 700 ms),
+Firmware 6b-4 dùng sàn HTTP timeout 400ms để hỗ trợ RTT 260ms đo được trong log;
 không để request HTTP blocking ngăn watchdog. Network chậm có thể làm xe dừng; không tăng
 TTL từ packet cũ để che lỗi. Retry background có backoff, không busy-loop, vẫn giữ động cơ
 dừng. Auth401: kiểm tra credential/activation với Admin, không retry dồn dập; session409:
@@ -525,3 +525,14 @@ secret. Rotate cần cập nhật secret và khởi tạo phiên mới, không s
 
 Chưa kiểm chứng ESP32, motor, HC-SR04, servo, Buzzer, Wi-Fi/TLS client thật, ngưỡng vật cản
 hoặc độ trễ dừng vật lý. Phase 6B phải đo và kiểm thử các điều kiện này trên phần cứng.
+
+Firmware 6b-4 retry lỗi transport/408/429/5xx trong phiên hiện tại, không đổi boot chỉ vì
+lỗi telemetry. ACK MOVE bị refresh cùng hướng có thể được ghi nhận khi còn TTL và cùng
+lease/generation đã xác nhận: lệnh cũ vẫn SUPERSEDED, không được chạy lại hoặc thay head.
+Đổi hướng/STOP/mode/generation/expiry vẫn từ chối ACK cũ chưa từng ghi nhận.
+
+Từ firmware 6b-5, GET commands/current bổ sung `control_session_id` cấp ngoài:
+UUID khi xe đang được mượn, null sau trả xe. Trường này vẫn có khi command=null.
+`control_authorized=false` chỉ cấm chuyển động; lượt mượn còn mở giữ relay ON ở Manual
+idle/STOP. Watchdog/fault vẫn có thể cắt nguồn. Command phải khớp borrow ID; xem
+[relay theo lượt mượn](fixes/borrow-powered-relay.md).

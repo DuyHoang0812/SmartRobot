@@ -13,6 +13,8 @@ from app.core.errors import AppError
 from app.core.security import verify_password
 from app.models import AuditLog, AuthSession, ControlSession, Robot, User
 from app.models.enums import UserRole
+from app.schemas.admin import RobotCreate
+from app.services.admin_robots import RobotManagementService
 from app.services.admin_users import UserManagementService
 from app.services.device_credentials import authenticate_device
 from tests.test_auth import (
@@ -253,6 +255,32 @@ def test_robot_creation_is_offline_and_secret_is_one_time(manager, db_engine):
         robot = authenticate_device(db, "esp32-01", data["credential"])
         assert robot is not None and robot.device_credential_hash != data["credential"]
         assert authenticate_device(db, "esp32-01", "wrong") is None
+
+
+@pytest.mark.parametrize("expire_on_commit", [False, True])
+def test_robot_creation_serializes_nullable_heartbeat_with_both_session_policies(
+    db_engine, accounts, expire_on_commit
+):
+    with Session(db_engine, expire_on_commit=expire_on_commit) as db:
+        service = RobotManagementService(db, accounts["admin"], 15)
+        result = service.create(RobotCreate(name="No heartbeat", device_id="new-no-heartbeat"))
+        assert result.robot.last_seen_at is None
+        assert result.robot.status == "OFFLINE"
+        assert result.robot.is_active
+        assert "device_credential_hash" not in result.robot.model_dump()
+
+
+def test_robot_response_loads_expired_attributes_instead_of_reading_instance_dict(
+    db_engine, accounts
+):
+    with Session(db_engine, expire_on_commit=False) as db:
+        service = RobotManagementService(db, accounts["admin"], 15)
+        robot = add_robot(db, name="Expired fields")
+        db.commit()
+        db.expire(robot, ["last_seen_at", "name", "updated_at"])
+        result = service.response(robot)
+        assert result.name == "Expired fields" and result.last_seen_at is None
+        assert result.status == "OFFLINE" and result.updated_at is not None
 
 
 def test_duplicate_device_id_and_robot_validation(manager):

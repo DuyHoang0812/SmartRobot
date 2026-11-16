@@ -65,7 +65,7 @@ export class RobotControlService {
     return this.stopPromise
   }
   async mode(mode: Mode) {
-    await this.stop()
+    this.intent += 1 // MODE itself fences/stops old motion; drop queued moves immediately.
     const grant = this.grant
     if (!grant) throw new Error('No lease')
     const body = { ...this.credentials(grant), mode, request_id: crypto.randomUUID(), client_sequence: ++this.clientSequence }
@@ -79,7 +79,10 @@ export class RobotControlService {
     this.releasePromise = (async () => {
       await stopped.catch(() => {})
       if (grant) await this.enqueue(() => this.request<void>('release', this.credentials(grant)))
-    })().finally(() => { this.releasePromise = null })
+    })().catch((failure: unknown) => {
+      if (!this.grant) this.grant = grant
+      throw failure
+    }).finally(() => { this.releasePromise = null })
     return this.releasePromise
   }
   forget() { this.intent += 1; this.grant = null }

@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import tempfile
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -33,6 +34,12 @@ def rows_from_config(config, directory):
         "turn_speed",
         "http_timeout_ms",
         "relay_console",
+        "left_motor_percent",
+        "right_motor_percent",
+        "auto_clearance_cm",
+        "auto_backup_ms",
+        "auto_turn_left_ms",
+        "auto_turn_right_ms",
     }
     if not isinstance(config, dict) or set(config) - allowed:
         raise ValueError("Unknown configuration fields")
@@ -46,8 +53,14 @@ def rows_from_config(config, directory):
     rows = [["robot", "namespace", "", ""]]
     for key, name, low, high in strings:
         value = config.get(name)
-        if not isinstance(value, str) or not low <= len(value.encode()) <= high or "\0" in value:
-            raise ValueError(f"Missing/invalid {name}; values are intentionally not echoed")
+        if (
+            not isinstance(value, str)
+            or not low <= len(value.encode()) <= high
+            or "\0" in value
+        ):
+            raise ValueError(
+                f"Missing/invalid {name}; values are intentionally not echoed"
+            )
         rows.append([key, "data", "string", value])
     if not re.fullmatch(r"[A-Za-z0-9_.:-]{3,128}", config["device_id"]):
         raise ValueError("Invalid Device ID")
@@ -63,18 +76,29 @@ def rows_from_config(config, directory):
         or not url.hostname
         or any(x in config["backend_url"] for x in "\r\n ")
     ):
-        raise ValueError("Backend URL must end in /api/v1/devices, without credentials/query")
+        raise ValueError(
+            "Backend URL must end in /api/v1/devices, without credentials/query"
+        )
     if url.scheme != "https":
         if url.scheme != "http" or config.get("allow_http_lan") is not True:
-            raise ValueError("HTTPS required unless allow_http_lan is explicitly enabled")
+            raise ValueError(
+                "HTTPS required unless allow_http_lan is explicitly enabled"
+            )
         addr = ipaddress.IPv4Address(url.hostname)
         if not any(
             addr in ipaddress.IPv4Network(net)
-            for net in ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"]
+            for net in [
+                "10.0.0.0/8",
+                "172.16.0.0/12",
+                "192.168.0.0/16",
+                "169.254.0.0/16",
+            ]
         ):
             raise ValueError("HTTP accepts only a numeric private LAN IPv4 address")
     if config.get("wifi_password") and len(config["wifi_password"].encode()) < 8:
-        raise ValueError("Wi-Fi password must be empty for an open AP or at least 8 bytes")
+        raise ValueError(
+            "Wi-Fi password must be empty for an open AP or at least 8 bytes"
+        )
     for key, name in [
         ("allow_http", "allow_http_lan"),
         ("motors_on", "motors_enabled"),
@@ -91,11 +115,41 @@ def rows_from_config(config, directory):
         ("turn_speed", "turn_speed", 75, 1, 255),
         ("blind_ms", "blind_manual_max_ms", 300, 50, 400),
         ("http_ms", "http_timeout_ms", 250, 50, 400),
+        ("auto_clear", "auto_clearance_cm", 15, 15, 100),
+        ("auto_back_ms", "auto_backup_ms", 400, 50, 400),
+        ("auto_left_ms", "auto_turn_left_ms", 400, 100, 1200),
+        ("auto_right_ms", "auto_turn_right_ms", 400, 100, 1200),
     ]:
         value = config.get(name, default)
         if type(value) is not int or not low <= value <= high:
             raise ValueError(f"Invalid {name}")
         rows.append([key, "data", "u8" if high == 255 else "u32", value])
+    rows.extend(
+        [
+            ["trim_rev", "data", "u8", 16],
+            ["auto_rev", "data", "u8", 10],
+        ]
+    )
+    for key, name, default in [
+        ("left_pct10", "left_motor_percent", 100),
+        ("right_pct10", "right_motor_percent", 83.5),
+    ]:
+        value = config.get(name, default)
+        if type(value) not in (int, float):
+            raise ValueError(f"Invalid {name}")
+        try:
+            scaled = Decimal(str(value)) * 10
+            if (
+                not scaled.is_finite()
+                or not 500 <= scaled <= 1500
+                or scaled != scaled.to_integral_value()
+            ):
+                raise ValueError(
+                    f"Invalid {name}: use 50..150 with at most one decimal"
+                )
+        except InvalidOperation as exc:
+            raise ValueError(f"Invalid {name}") from exc
+        rows.append([key, "data", "u32", int(scaled)])
     if config.get("slow_speed", 30) > config.get("full_speed", 75):
         raise ValueError("slow_speed must not exceed full_speed")
     ntp = config.get("ntp_server", "pool.ntp.org")
@@ -112,14 +166,18 @@ def rows_from_config(config, directory):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("config", nargs="?", type=Path, default=ROOT / "device.local.json")
+    parser.add_argument(
+        "config", nargs="?", type=Path, default=ROOT / "device.local.json"
+    )
     parser.add_argument("--out", type=Path, default=ROOT / "secrets" / "robot_cfg.bin")
     parser.add_argument("--idf-python", type=Path)
     args = parser.parse_args()
     csv_path = None
     os.umask(0o077)
     try:
-        rows = rows_from_config(json.loads(args.config.read_text()), args.config.resolve().parent)
+        rows = rows_from_config(
+            json.loads(args.config.read_text()), args.config.resolve().parent
+        )
         core = Path(os.environ.get("PLATFORMIO_CORE_DIR", Path.home() / ".platformio"))
         python = args.idf_python or core / "penv" / ".espidf-6.1.0" / "bin" / "python"
         if not python.is_file():
@@ -144,10 +202,13 @@ def main():
                 str(args.out.resolve()),
                 "0x10000",
             ],
+            check=False,
             capture_output=True,
         )
         if result.returncode:
-            raise ValueError("NVS generation failed; output suppressed to protect credentials")
+            raise ValueError(
+                "NVS generation failed; output suppressed to protect credentials"
+            )
         args.out.chmod(0o600)
         print("Private NVS image generated (0600). No device was flashed.")
     except (ValueError, OSError, KeyError, TypeError):

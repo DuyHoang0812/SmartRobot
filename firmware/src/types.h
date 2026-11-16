@@ -32,9 +32,13 @@ typedef struct {
     movement_t movement;
     obstacle_t obstacle;
     sensor_reading_t sensor;
-    bool buzzer, relay, authorized, needs_reset;
+    bool buzzer, relay, borrowed, authorized, needs_reset;
     uint64_t sequence, generation, applied_sequence;
     int64_t deadline_us;
+    uint8_t motor_duty;
+    uint8_t left_motor_duty, right_motor_duty;
+    float left_motor_percent, right_motor_percent;
+    uint32_t auto_clearance_cm, auto_backup_ms, auto_turn_left_ms, auto_turn_right_ms;
 } robot_snapshot_t;
 
 const char *mode_name(robot_mode_t mode);

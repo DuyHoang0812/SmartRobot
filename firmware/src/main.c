@@ -41,9 +41,12 @@ void app_main(void)
     if (wifi_start(&config) != ESP_OK) { robot_fault(true); safe_halt("Wi-Fi initialization failed"); }
     if (xTaskCreatePinnedToCore(device_task, "device_http", 12288, &config, 4, NULL, 0) != pdPASS)
         safe_halt("Device task unavailable");
-    if (xTaskCreate(console_task, "local_console", 3072, NULL, 2, NULL) != pdPASS)
+    if (xTaskCreate(console_task, "local_console", 3072, &config, 2, NULL) != pdPASS)
         safe_halt("Console unavailable");
     ESP_LOGI("startup", "SmartRobot ready: ESP-IDF, 4MB target, no automatic motor activation");
     ESP_LOGI("startup", "Motor outputs armed: %s; blind Manual opt-in: %s",
         config.motors_enabled ? "yes" : "no", config.allow_blind_manual ? "yes" : "no");
+    ESP_LOGI("startup", "Wheels: OUT1/2=RIGHT OUT3/4=LEFT; trim LEFT=%.1f%% RIGHT=%.1f%%; Auto clearance=%lucm backup=%lums",
+        config.left_motor_percent, config.right_motor_percent,
+        (unsigned long)config.auto_clearance_cm, (unsigned long)config.auto_backup_ms);
 }

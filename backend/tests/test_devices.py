@@ -157,6 +157,36 @@ def test_fetch_is_repeatable_and_does_not_acknowledge_or_execute(device):
     assert state["actual_movement"] is None and state["mode_pending"]
 
 
+@pytest.mark.parametrize("after_stop", [False, True])
+def test_borrow_identity_stays_present_while_idle_and_disappears_only_on_return(device, after_stop):
+    grant = manual(device)
+    if after_stop:
+        assert (
+            device["client"].post(device["base"] + "/stop", json=payload(grant)).status_code == 202
+        )
+    command = current(device)["command"]
+    assert current(device)["control_session_id"] == grant["id"]
+    with Session(device["db"]) as db:
+        row = db.get(RobotCommand, command["command_id"])
+        row.issued_at = datetime.now(UTC) - timedelta(seconds=5)
+        row.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        db.commit()
+    idle = current(device)
+    assert idle["command"] is None and not idle["control_authorized"]
+    assert idle["control_session_id"] == grant["id"]
+    assert (
+        device["client"]
+        .post(
+            device["base"] + "/release",
+            json={"control_session_id": grant["id"], "lease_token": grant["lease_token"]},
+        )
+        .status_code
+        == 204
+    )
+    returned = current(device)
+    assert returned["control_session_id"] is None and returned["command"] is None
+
+
 def test_received_then_applied_safe_handoff_and_ack_idempotency(device):
     acquire(device)
     command = current(device)["command"]
@@ -187,13 +217,13 @@ def test_applied_move_does_not_invent_actual_movement(device):
 
 
 @pytest.mark.parametrize("status", ["REJECTED", "FAILED"])
-def test_failed_or_rejected_ack_revokes_lease_and_can_be_retried(device, status):
+def test_failed_or_rejected_ack_stops_motion_and_keeps_borrow(device, status):
     acquire(device)
     command = current(device)["command"]
     assert ack(device, command, status).status_code == 200
     assert ack(device, command, status).json()["duplicate"]
     assert not current(device)["control_authorized"]
-    assert not device["client"].get(device["base"] + "/session").json()["owned"]
+    assert device["client"].get(device["base"] + "/session").json()["owned"]
 
 
 def test_expired_command_and_old_ack_after_stop_are_rejected(device):
@@ -215,7 +245,7 @@ def test_expired_command_and_old_ack_after_stop_are_rejected(device):
     assert ack(device, latest).status_code == 409
 
 
-@pytest.mark.parametrize("event", ["release", "logout", "lease_timeout", "auto_timeout", "offline"])
+@pytest.mark.parametrize("event", ["release", "logout", "auto_timeout", "offline"])
 def test_lost_authorization_never_delivers_an_old_motion(device, event):
     grant = manual(device)
     mode = "AUTO" if event == "auto_timeout" else "MANUAL"
@@ -241,14 +271,8 @@ def test_lost_authorization_never_delivers_an_old_motion(device, event):
             == 204
         )
     else:
-        from app.models import ControlSession
-
         with Session(device["db"]) as db:
-            if event == "lease_timeout":
-                lease = db.get(ControlSession, grant["id"])
-                lease.started_at = datetime.now(UTC) - timedelta(seconds=20)
-                lease.expires_at = datetime.now(UTC) - timedelta(seconds=1)
-            elif event == "offline":
+            if event == "offline":
                 db.get(Robot, device["robot_id"]).last_seen_at = None
             else:
                 row = db.get(RobotCommand, old["command_id"])
@@ -301,7 +325,7 @@ def test_telemetry_rate_ordering_and_conflicting_replay(device):
 
 
 def test_reboot_fences_lease_and_retires_previous_boot_requests(device):
-    manual(device)
+    grant = manual(device)
     old = current(device)
     response = device["client"].post(
         BASE + "/authenticate", headers=device["headers"], json={"boot_id": str(uuid4())}
@@ -321,6 +345,143 @@ def test_reboot_fences_lease_and_retires_previous_boot_requests(device):
     )
     with Session(device["db"]) as db:
         assert db.get(Robot, device["robot_id"]).last_seen_at is None
+    assert device["client"].get(device["base"] + "/session").json()["owned"]
+    device["headers"]["X-Device-Session"] = response.json()["device_session_id"]
+    assert (
+        device["client"]
+        .post(BASE + "/heartbeat", headers=device["headers"], json={"heartbeat_sequence": 1})
+        .status_code
+        == 200
+    )
+    assert (
+        device["client"]
+        .post(
+            device["base"] + "/renew",
+            json={"control_session_id": grant["id"], "lease_token": grant["lease_token"]},
+        )
+        .status_code
+        == 200
+    )
+    command = current(device)["command"]
+    assert command["kind"] == "MODE" and command["mode"] == "MANUAL"
+    assert command["generation"] > old["generation"]
+    assert ack(device, command, safe=True).status_code == 200
+    assert (
+        device["client"]
+        .post(device["base"] + "/move", json=payload(grant, direction="FORWARD"))
+        .status_code
+        == 202
+    )
+
+
+def test_auto_timeout_keeps_selected_mode_and_requires_a_fresh_safe_handoff(device):
+    grant = manual(device)
+    assert (
+        device["client"]
+        .post(device["base"] + "/mode", json=payload(grant, mode="AUTO"))
+        .status_code
+        == 202
+    )
+    assert ack(device, safe=True).status_code == 200
+    old = current(device)["command"]
+    with Session(device["db"]) as db:
+        row = db.get(RobotCommand, old["command_id"])
+        row.issued_at = datetime.now(UTC) - timedelta(seconds=30)
+        row.expires_at = datetime.now(UTC) - timedelta(seconds=20)
+        db.commit()
+    assert current(device)["command"] is None
+    assert device["client"].get(device["base"] + "/session").json()["owned"]
+    assert (
+        device["client"]
+        .post(
+            device["base"] + "/renew",
+            json={"control_session_id": grant["id"], "lease_token": grant["lease_token"]},
+        )
+        .status_code
+        == 200
+    )
+    restarted = current(device)
+    assert restarted["lease_expires_at"] is None
+    assert restarted["authorization_expires_at"] is not None
+    assert restarted["command"]["kind"] == "MODE"
+    assert restarted["command"]["mode"] == "AUTO"
+    assert restarted["mode_pending"]
+    assert restarted["generation"] > old["generation"]
+    assert ack(device, restarted["command"], safe=True).status_code == 200
+
+
+def test_reboot_preserves_auto_selection_and_rearms_only_after_owner_renew(device):
+    grant = manual(device)
+    assert (
+        device["client"]
+        .post(device["base"] + "/mode", json=payload(grant, mode="AUTO"))
+        .status_code
+        == 202
+    )
+    assert ack(device, safe=True).status_code == 200
+    response = device["client"].post(
+        BASE + "/authenticate", headers=device["headers"], json={"boot_id": str(uuid4())}
+    )
+    assert response.status_code == 200
+    device["headers"]["X-Device-Session"] = response.json()["device_session_id"]
+    state = device["client"].get(device["base"] + "/state").json()
+    assert state["requested_mode"] == "AUTO" and state["mode_pending"]
+    assert state["lease"]["owned"] and current(device)["command"] is None
+    assert (
+        device["client"]
+        .post(BASE + "/heartbeat", headers=device["headers"], json={"heartbeat_sequence": 1})
+        .status_code
+        == 200
+    )
+    assert (
+        device["client"]
+        .post(
+            device["base"] + "/renew",
+            json={"control_session_id": grant["id"], "lease_token": grant["lease_token"]},
+        )
+        .status_code
+        == 200
+    )
+    command = current(device)["command"]
+    assert command["kind"] == "MODE" and command["mode"] == "AUTO"
+    assert ack(device, command, safe=True).status_code == 200
+
+
+def test_delayed_ack_for_refreshed_same_direction_does_not_revive_old_move(device):
+    grant = manual(device)
+    first = (
+        device["client"]
+        .post(device["base"] + "/move", json=payload(grant, 1, direction="FORWARD"))
+        .json()
+    )
+    second = (
+        device["client"]
+        .post(device["base"] + "/move", json=payload(grant, 2, direction="FORWARD"))
+        .json()
+    )
+    assert ack(device, first).status_code == 200
+    assert ack(device, first).json()["duplicate"]
+    active = current(device)["command"]
+    assert active["command_id"] == second["command_id"] and active["status"] == "ACCEPTED"
+    with Session(device["db"]) as db:
+        old = db.get(RobotCommand, first["command_id"])
+        assert old.status.value == "SUPERSEDED" and old.acknowledgement == "APPLIED"
+
+
+def test_delayed_ack_for_changed_direction_stays_rejected(device):
+    grant = manual(device)
+    first = (
+        device["client"]
+        .post(device["base"] + "/move", json=payload(grant, 1, direction="FORWARD"))
+        .json()
+    )
+    second = (
+        device["client"]
+        .post(device["base"] + "/move", json=payload(grant, 2, direction="BACKWARD"))
+        .json()
+    )
+    assert ack(device, first).status_code == 409
+    assert current(device)["command"]["command_id"] == second["command_id"]
 
 
 def test_rotation_revokes_secret_and_device_session(device):
@@ -533,7 +694,7 @@ def test_public_auto_to_manual_waits_for_safe_device_ack(device):
     )
 
 
-def test_heartbeat_after_offline_revokes_old_lease_before_marking_online(device):
+def test_heartbeat_after_offline_fences_motion_and_keeps_borrow(device):
     manual(device)
     old = current(device)
     with Session(device["db"]) as db:
@@ -544,6 +705,7 @@ def test_heartbeat_after_offline_revokes_old_lease_before_marking_online(device)
     )
     assert response.status_code == 200 and response.json()["generation"] > old["generation"]
     assert current(device)["command"] is None
+    assert device["client"].get(device["base"] + "/session").json()["owned"]
 
 
 def test_old_generation_telemetry_cannot_overwrite_current_state(device):

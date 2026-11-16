@@ -13,6 +13,12 @@
   "full_speed": 75,
   "slow_speed": 30,
   "turn_speed": 75,
+  "left_motor_percent": 100,
+  "right_motor_percent": 83.5,
+  "auto_clearance_cm": 15,
+  "auto_backup_ms": 400,
+  "auto_turn_left_ms": 400,
+  "auto_turn_right_ms": 400,
   "http_timeout_ms": 250,
   "relay_console": false
 }

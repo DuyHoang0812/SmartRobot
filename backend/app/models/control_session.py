@@ -10,7 +10,7 @@ from app.db.base import Base, UUIDPrimaryKey
 class ControlSession(UUIDPrimaryKey, Base):
     __tablename__ = "control_sessions"
     __table_args__ = (
-        # Close expired leases in the acquisition transaction before replacement.
+        # A borrowed robot stays reserved until it is explicitly returned.
         Index(
             "uq_control_sessions_open_robot",
             "robot_id",
@@ -36,5 +36,5 @@ class ControlSession(UUIDPrimaryKey, Base):
     )
     last_client_sequence: Mapped[int] = mapped_column(BigInteger, server_default="0")
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

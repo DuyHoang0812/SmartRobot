@@ -126,7 +126,7 @@ bool protocol_envelope(const cJSON *j, const session_t *s, int64_t start, int64_
 {
     memset(e, 0, sizeof(*e));
     robot_mode_t requested;
-    int64_t server, authorization, expiry, lease, issued;
+    int64_t server, authorization, expiry, lease = 0, issued;
     if (!eq(j, "robot_id", s->robot_id) || !eq(j, "device_session_id", s->session_id)
         || !eq(j, "fail_safe", "STOP") || !timestamp(j, "server_time", &server)
         || !protocol_uint(j, "sequence", &e->sequence) || !protocol_uint(j, "generation", &e->generation)
@@ -134,17 +134,24 @@ bool protocol_envelope(const cJSON *j, const session_t *s, int64_t start, int64_
         || !boolean(j, "control_authorized", &e->authorized) || !boolean(j, "mode_pending", &e->mode_pending)
         || received < start) return false;
     const cJSON *c = cJSON_GetObjectItemCaseSensitive(j, "command");
+    const cJSON *borrow = cJSON_GetObjectItemCaseSensitive(j, "control_session_id");
+    if (borrow && !cJSON_IsNull(borrow) && !id(j, "control_session_id", e->lease_id)) return false;
     if (!e->authorized) return cJSON_IsNull(c) && cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(j, "authorization_expires_at"));
     command_t *out = &e->command;
+    const cJSON *lease_expiry = cJSON_GetObjectItemCaseSensitive(j, "lease_expires_at");
+    bool persistent_lease = cJSON_IsNull(lease_expiry);
+    if (!persistent_lease && !timestamp(j, "lease_expires_at", &lease)) return false;
     if (!cJSON_IsObject(c) || !id(c, "command_id", out->id) || !id(c, "robot_id", out->robot_id)
         || strcmp(out->robot_id, s->robot_id) || !id(c, "control_session_id", out->lease_id)
         || !protocol_uint(c, "sequence", &out->sequence) || out->sequence != e->sequence || !out->sequence
         || !protocol_uint(c, "generation", &out->generation) || out->generation != e->generation
         || !mode(c, "mode", &out->mode) || out->mode != requested
-        || !timestamp(j, "authorization_expires_at", &authorization) || !timestamp(j, "lease_expires_at", &lease)
+        || !timestamp(j, "authorization_expires_at", &authorization)
         || !timestamp(c, "issued_at", &issued) || !timestamp(c, "expires_at", &expiry)
-        || expiry <= issued || authorization > expiry || authorization > lease
+        || expiry <= issued || authorization > expiry || (!persistent_lease && authorization > lease)
         || authorization <= server || issued > server) return false;
+    if (borrow && (cJSON_IsNull(borrow) || strcmp(e->lease_id, out->lease_id))) return false;
+    if (!borrow) memcpy(e->lease_id, out->lease_id, UUID_LEN); // Older backend: infer only while a command exists.
     if (!(eq(c, "status", "ACCEPTED") || eq(c, "status", "RECEIVED")
           || eq(c, "status", "APPLIED") || eq(c, "status", "EXECUTED"))) return false;
     if (eq(c, "kind", "MOVE")) out->kind = KIND_MOVE;
@@ -168,7 +175,15 @@ bool protocol_envelope(const cJSON *j, const session_t *s, int64_t start, int64_
     if (remaining > ttl * 1000LL) remaining = ttl * 1000LL;
     out->deadline_us = start + remaining - 20000; // Full RTT + 20ms margin, not receive + TTL.
     out->safe_handoff = out->kind == KIND_MODE || (out->kind == KIND_STOP && e->mode_pending);
-    return out->deadline_us > received;
+    e->expired = out->deadline_us <= received;
+    return true; // A valid command can expire IN FLIGHT; do not confuse this with bad session/JSON.
+}
+
+write_result_t protocol_write_result(int status, bool transport_ok, bool receipt_valid)
+{
+    if (!transport_ok || status == 408 || status == 429 || status >= 500) return WRITE_RETRY;
+    if (transport_ok && status == 409) return WRITE_SUPERSEDED;
+    return transport_ok && status == 200 && receipt_valid ? WRITE_OK : WRITE_FAILED;
 }
 
 bool protocol_heartbeat(const cJSON *j, const session_t *s, uint64_t sequence, int64_t start,

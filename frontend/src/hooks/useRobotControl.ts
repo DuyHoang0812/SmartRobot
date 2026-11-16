@@ -19,47 +19,65 @@ export function useRobotControl(id: string, enabled: boolean) {
   const [pending, setPending] = useState(false)
   const [accepted, setAccepted] = useState<RobotCommand | null>(null)
   const held = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const moving = useRef(false)
   const turn = useRef(0)
   const leaseIntent = useRef(0)
   const alive = useRef(true)
+  const restoring = useRef<string | null>(null)
   const query = useQuery({ queryKey: key, queryFn: ({ signal }) => service.state(signal),
     enabled: enabled && Boolean(user), retry: false,
     refetchInterval: (query) => isRobotNotFound(query.state.error) || connection === 'connected' ? false : 5000,
     refetchOnWindowFocus: (query) => !isRobotNotFound(query.state.error),
     refetchOnReconnect: (query) => !isRobotNotFound(query.state.error) })
+  const refetch = query.refetch
 
   const stop = useCallback(() => {
+    const wasMoving = moving.current
+    moving.current = false
     turn.current += 1
     if (held.current) clearTimeout(held.current)
     held.current = null
+    if (!wasMoving) return
     void service.stop().then((command) => { if (command && alive.current) setAccepted(command) })
       .catch((failure: unknown) => { if (alive.current) setError(errorMessage(failure)) })
   }, [service])
 
   const release = useCallback(() => {
     leaseIntent.current += 1
+    restoring.current = grant?.id ?? null
     stop()
-    setGrant(null)
-    setLeaseAlive(false)
-    return service.release().catch((failure: unknown) => {
+    setPending(true)
+    return service.release().then(() => {
+      setGrant(null)
+      setLeaseAlive(false)
+      cache.setQueryData<ControlState>(key, (previous) => previous && {
+        ...previous, lease: { id: null, owned: false, expires_at: null },
+      })
+      void refetch()
+    }).catch((failure: unknown) => {
       if (alive.current) setError(errorMessage(failure))
-    })
-  }, [service, stop])
+    }).finally(() => { if (alive.current) setPending(false) })
+  }, [service, stop, cache, key, refetch, grant?.id])
+
+  const halt = useCallback(() => {
+    stop()
+  }, [stop])
 
   useEffect(() => {
     if (enabled) return
-    const timer = setTimeout(() => { void release() }, 0)
+    const timer = setTimeout(halt, 0)
     return () => clearTimeout(timer)
-  }, [enabled, release])
+  }, [enabled, halt])
 
   useEffect(() => {
     alive.current = true
-    const lose = () => { void release() }
+    const lose = halt
     const hidden = () => { if (document.hidden) lose() }
     window.addEventListener('blur', lose)
     document.addEventListener('visibilitychange', hidden)
-    const unsubscribeLogout = beforeLogout(release)
+    const unsubscribeLogout = beforeLogout(async () => { stop(); await service.stop() })
     const unsubscribe = onSessionExpired(() => {
+      moving.current = false
       leaseIntent.current += 1
       turn.current += 1
       if (held.current) clearTimeout(held.current)
@@ -67,15 +85,16 @@ export function useRobotControl(id: string, enabled: boolean) {
     })
     return () => {
       alive.current = false
+      stop()
       turn.current += 1
       if (held.current) clearTimeout(held.current)
-      void service.release().catch(() => {})
+      // Auto authorization expires independently when renew stops. Keep its selected mode.
       unsubscribe()
       unsubscribeLogout()
       window.removeEventListener('blur', lose)
       document.removeEventListener('visibilitychange', hidden)
     }
-  }, [service, release])
+  }, [service, halt, stop])
 
   const hasState = enabled && Boolean(query.data)
   useEffect(() => {
@@ -83,38 +102,33 @@ export function useRobotControl(id: string, enabled: boolean) {
     const socket = new RobotWebSocket(id, (data) => {
       cache.setQueryData<ControlState>(key, (previous) =>
         previous && Date.parse(previous.server_time) > Date.parse(data.server_time) ? previous : data)
-    }, setConnection, () => { void release() })
+    }, setConnection, halt)
     void socket.start()
     return () => socket.close()
-  }, [id, hasState, cache, key, release])
+  }, [id, hasState, cache, key, halt])
 
   useEffect(() => {
-    if (!grant || connection !== 'connected') return
+    if (!grant || !enabled || connection !== 'connected') return
     let finished = false
     const renew = async () => {
       if (finished) return
-      if (Date.now() >= Date.parse(grant.expires_at)) { await release(); return }
       try {
         const renewed = await service.renew()
-        if (!renewed.expires_at) throw new Error('Lease expired')
         if (!finished) {
           // Keep the secret only in local state; never put a lease grant into Query cache.
           setGrant({ ...grant, expires_at: renewed.expires_at })
         }
       } catch (failure) {
-        if (!finished) { setError(errorMessage(failure)); await release() }
+        if (!finished) {
+          setError(errorMessage(failure)); halt()
+          // Retry even if the socket remains connected after a transient REST error.
+          timer = setTimeout(() => { void renew() }, grant.renew_after_ms)
+        }
       }
     }
-    const timer = setTimeout(() => { void renew() }, grant.renew_after_ms)
+    let timer = setTimeout(() => { void renew() }, grant.renew_after_ms)
     return () => { finished = true; clearTimeout(timer) }
-  }, [grant, connection, service, release])
-
-  useEffect(() => {
-    if (!grant) return
-    const timer = setTimeout(() => { setLeaseAlive(false); void release() },
-      Math.max(0, Date.parse(grant.expires_at) - Date.now()))
-    return () => clearTimeout(timer)
-  }, [grant, release])
+  }, [grant, enabled, connection, service, halt])
 
   const state = query.data
   const owns = Boolean(leaseAlive && grant && state?.lease.owned && state.lease.id === grant.id)
@@ -124,7 +138,8 @@ export function useRobotControl(id: string, enabled: boolean) {
 
   const start = useCallback((direction: MoveDirection) => {
     if (!canDrive) return
-    stop()
+    if (moving.current) stop()
+    moving.current = true
     const intent = service.beginIntent()
     const currentTurn = ++turn.current
     const tick = async () => {
@@ -136,34 +151,42 @@ export function useRobotControl(id: string, enabled: boolean) {
         held.current = setTimeout(() => { void tick() }, 250)
       } catch (failure) {
         if (alive.current) setError(errorMessage(failure))
-        await release()
+        halt()
       }
     }
     void tick()
-  }, [canDrive, stop, service, release])
+  }, [canDrive, stop, service, halt])
 
   useEffect(() => { if (!canDrive) stop() }, [canDrive, stop])
 
-  async function acquire() {
+  const acquire = useCallback(async () => {
     const intent = ++leaseIntent.current
     setPending(true); setError('')
     try {
       const acquired = await service.acquire()
-      if (!alive.current || intent !== leaseIntent.current) { await service.release(); return }
-      setGrant(acquired); setLeaseAlive(true); await query.refetch()
+      if (!alive.current || intent !== leaseIntent.current) { await service.stop(); return }
+      setGrant(acquired); setLeaseAlive(true); await refetch()
     }
     catch (failure) { if (alive.current) setError(errorMessage(failure)) }
     finally { if (alive.current) setPending(false) }
-  }
+  }, [service, refetch])
+
+  useEffect(() => {
+    if (!enabled || !state?.lease.owned || !state.lease.id || grant || pending
+      || restoring.current === state.lease.id) return
+    restoring.current = state.lease.id
+    // Recover credentials from the server as the authenticated borrower after reload/login.
+    void acquire()
+  }, [enabled, state?.lease.owned, state?.lease.id, grant, pending, acquire])
   async function mode(value: Mode) {
     stop(); setPending(true); setError('')
     try { setAccepted(await service.mode(value)); await query.refetch() }
-    catch (failure) { setError(errorMessage(failure)); await release() }
+    catch (failure) { setError(errorMessage(failure)); halt() }
     finally { setPending(false) }
   }
   const displayState = state && (connection !== 'connected' || query.error)
     ? { ...state, telemetry_fresh: false, acknowledgement: null } : state
   return { state: displayState, loading: query.isPending, queryError: query.error, error, pending, connection,
     owns, canDrive, accepted, start, stop, acquire, release, mode,
-    retry: () => { setError(''); void query.refetch() } }
+    retry: () => { setError(''); if (state?.lease.owned && !grant) void acquire(); else void refetch() } }
 }

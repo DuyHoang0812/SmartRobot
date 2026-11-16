@@ -115,6 +115,13 @@ class ControlService:
         self._emit(ctx, previous, CommandKind.STOP, Direction.STOP)
         ctx.lease = None
 
+    def _halt(self, ctx: Context) -> None:
+        """Fence motion without returning the user's borrowed robot."""
+        self.repo.supersede(ctx.robot.id)
+        ctx.state.generation += 1
+        ctx.state.mode_pending = True
+        ctx.state.confirmed_generation = None
+
     def prepare(self, robot_id: UUID, actor: ControlActor | None = None) -> Context:
         if actor:
             self._actor_lock(actor)
@@ -124,17 +131,21 @@ class ControlService:
         lease = self.repo.lease(robot_id)
         state = self.repo.runtime(robot_id)
         ctx = Context(robot, state, lease, self._now())
-        if lease and (
-            lease.expires_at <= ctx.now
-            or not self.online(robot, ctx.now)
-            or not self._family_valid(lease, ctx.now)
-        ):
+        owner = self.db.get(User, lease.user_id) if lease else None
+        if lease and (not robot.is_active or not owner or not owner.is_active):
             self._end(ctx)
         command = self.repo.latest(state)
+        if (
+            ctx.lease
+            and command
+            and command.status in ACTIVE_COMMANDS
+            and (not self.online(robot, ctx.now) or not self._family_valid(ctx.lease, ctx.now))
+        ):
+            self._halt(ctx)
         if command and command.status in ACTIVE_COMMANDS and command.expires_at <= ctx.now:
             command.status = CommandStatus.EXPIRED
             if ctx.lease and (ctx.state.mode_pending or ctx.state.requested_mode == RobotMode.AUTO):
-                self._end(ctx)
+                self._halt(ctx)
         self.db.flush()
         return ctx
 
@@ -155,7 +166,7 @@ class ControlService:
             else self.settings.mode_command_ttl_ms
         )
         expiry = ctx.now + timedelta(milliseconds=ttl)
-        if kind != CommandKind.STOP:
+        if kind != CommandKind.STOP and lease.expires_at is not None:
             expiry = min(expiry, lease.expires_at)
         command = RobotCommand(
             robot_id=ctx.robot.id,
@@ -199,19 +210,25 @@ class ControlService:
 
     def acquire(self, robot_id: UUID, actor: ControlActor) -> LeaseGrant:
         ctx = self.prepare(robot_id, actor)
-        self._require_online(ctx)
-        if ctx.lease:
+        if ctx.lease and ctx.lease.user_id != actor.user_id:
             self.db.commit()
             raise AppError("Xe đang được điều khiển.", 409)
+        if not ctx.lease:
+            self._require_online(ctx)
         secret = random_token()
-        lease = ControlSession(
+        lease = ctx.lease or ControlSession(
             user_id=actor.user_id,
             auth_session_id=actor.auth_session_id,
             robot_id=robot_id,
             lease_token_hash=token_hash(secret),
             started_at=ctx.now,
-            expires_at=ctx.now + timedelta(seconds=self.settings.control_lease_seconds),
+            expires_at=None,
         )
+        # The same user can resume after reload/login; retire old browser credentials.
+        lease.auth_session_id = actor.auth_session_id
+        lease.lease_token_hash = token_hash(secret)
+        lease.last_client_sequence = 0
+        lease.expires_at = None
         self.db.add(lease)
         self.db.flush()
         ctx.lease = lease
@@ -219,7 +236,11 @@ class ControlService:
         ctx.state.confirmed_generation = None
         ctx.state.requested_mode = RobotMode.MANUAL
         ctx.state.mode_pending = True
-        self._emit(ctx, lease, CommandKind.MODE, Direction.STOP)
+        if self.online(ctx.robot, ctx.now):
+            self._emit(ctx, lease, CommandKind.MODE, Direction.STOP)
+        else:
+            # The borrower can recover credentials and return even an offline robot.
+            self.repo.supersede(ctx.robot.id)
         self.db.add(AuditLog(user_id=actor.user_id, robot_id=robot_id, action="control.acquired"))
         result = LeaseGrant(
             id=lease.id,
@@ -235,8 +256,11 @@ class ControlService:
         ctx = self.prepare(robot_id, actor)
         lease = self._owned(ctx, actor, payload)
         self._require_online(ctx)
-        lease.expires_at = ctx.now + timedelta(seconds=self.settings.control_lease_seconds)
-        if ctx.state.requested_mode == RobotMode.AUTO and not ctx.state.mode_pending:
+        if ctx.state.mode_pending:
+            latest = self.repo.latest(ctx.state)
+            if not latest or latest.status not in ACTIVE_COMMANDS:
+                self._emit(ctx, lease, CommandKind.MODE, Direction.STOP)
+        elif ctx.state.requested_mode == RobotMode.AUTO:
             self._emit(ctx, lease, CommandKind.KEEPALIVE, Direction.STOP)
         result = LeaseView(id=lease.id, owned=True, expires_at=lease.expires_at)
         self.db.commit()
@@ -337,11 +361,7 @@ class ControlService:
         if not ctx.robot.is_active:
             self.db.commit()
             raise AppError("Không tìm thấy xe robot.", 404)
-        owned = bool(
-            ctx.lease
-            and ctx.lease.user_id == actor.user_id
-            and ctx.lease.auth_session_id == actor.auth_session_id
-        )
+        owned = bool(ctx.lease and ctx.lease.user_id == actor.user_id)
         lease = LeaseView(
             id=ctx.lease.id if owned else None,
             owned=owned,
@@ -394,7 +414,7 @@ class ControlService:
     def disconnect(self, robot_id: UUID, family_id: UUID) -> None:
         ctx = self.prepare(robot_id)
         if ctx.lease and ctx.lease.auth_session_id == family_id:
-            self._end(ctx)
+            self._halt(ctx)
         self.db.commit()
 
     def cleanup(self) -> None:

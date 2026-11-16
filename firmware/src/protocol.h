@@ -9,7 +9,8 @@ typedef struct {
 } session_t;
 typedef struct {
     uint64_t sequence, generation;
-    bool authorized, mode_pending;
+    char lease_id[UUID_LEN];
+    bool authorized, mode_pending, expired;
     command_t command;
 } envelope_t;
 
@@ -25,4 +26,6 @@ bool protocol_heartbeat(const cJSON *json, const session_t *session, uint64_t se
 bool protocol_ack_receipt(const cJSON *json, const session_t *session, const command_t *command, ack_status_t status);
 bool protocol_telemetry_receipt(const cJSON *json, const session_t *session, uint64_t sample);
 char *protocol_ack_body(const command_t *command, ack_status_t status);
+typedef enum { WRITE_OK, WRITE_SUPERSEDED, WRITE_RETRY, WRITE_FAILED } write_result_t;
+write_result_t protocol_write_result(int status, bool transport_ok, bool receipt_valid);
 char *telemetry_body(const session_t *session, const robot_snapshot_t *snapshot, uint64_t sample, int64_t now);

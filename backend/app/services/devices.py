@@ -75,10 +75,10 @@ class DeviceService:
             if current:
                 current.ended_at = ctx.now
                 self.db.flush()
-            self.control._end(ctx)
             self.control.repo.supersede(ctx.robot.id)
             ctx.state.generation += 1
-            ctx.state.requested_mode = RobotMode.MANUAL
+            if not ctx.lease:
+                ctx.state.requested_mode = RobotMode.MANUAL
             ctx.state.mode_pending = True
             ctx.state.confirmed_generation = None
             ctx.state.actual_mode = None
@@ -161,9 +161,8 @@ class DeviceService:
             requested_mode=ctx.state.requested_mode if ctx.lease else RobotMode.MANUAL,
             mode_pending=ctx.state.mode_pending,
             control_authorized=valid,
-            authorization_expires_at=min(command.expires_at, ctx.lease.expires_at)
-            if valid
-            else None,
+            control_session_id=ctx.lease.id if ctx.lease else None,
+            authorization_expires_at=command.expires_at if valid else None,
             lease_expires_at=ctx.lease.expires_at if ctx.lease else None,
             command=CommandView.model_validate(command) if valid else None,
             poll_interval_ms=self.settings.device_poll_interval_ms,
@@ -193,6 +192,44 @@ class DeviceService:
             self.db.commit()
             return result
         command = self.control.repo.latest(ctx.state)
+        # A held direction is refreshed while an earlier ACK is in flight. Recording that
+        # ACK is safe if the SAME direction/generation is still current, without reviving it.
+        refreshed_move = bool(
+            ctx.lease
+            and command
+            and previous
+            and previous.robot_id == ctx.robot.id
+            and previous.control_session_id == ctx.lease.id
+            and previous.sequence == payload.sequence
+            and previous.sequence < command.sequence
+            and previous.generation == payload.generation == ctx.state.generation
+            and not ctx.state.mode_pending
+            and ctx.state.confirmed_generation == ctx.state.generation
+            and previous.kind == command.kind == CommandKind.MOVE
+            and previous.direction == command.direction
+            and previous.mode == command.mode == RobotMode.MANUAL
+            and previous.status == CommandStatus.SUPERSEDED
+            and previous.expires_at > ctx.now
+            and command.expires_at > ctx.now
+            and command.status in ACTIVE_COMMANDS
+            and payload.status == AckStatus.APPLIED
+            and not payload.safe_mode_switch
+            and previous.acknowledgement is None
+        )
+        if refreshed_move:
+            previous.acknowledgement = payload.status.value
+            previous.acknowledged_at = ctx.now
+            previous.acknowledgement_hash = fingerprint
+            result = AckReceipt(
+                robot_id=ctx.robot.id,
+                command_id=previous.id,
+                sequence=previous.sequence,
+                status=payload.status,
+                acknowledged_at=previous.acknowledged_at,
+                duplicate=False,
+            )
+            self.db.commit()
+            return result
         if (
             not ctx.lease
             or not command
@@ -239,7 +276,7 @@ class DeviceService:
                 ctx.state.reported_at = ctx.now
                 ctx.state.last_report_sequence = command.sequence
             if payload.status in [AckStatus.FAILED, AckStatus.REJECTED]:
-                self.control._end(ctx)
+                self.control._halt(ctx)
         result = AckReceipt(
             robot_id=ctx.robot.id,
             command_id=command.id,

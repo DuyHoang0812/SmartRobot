@@ -30,7 +30,7 @@ export function RobotControlPage() {
       {robot.data && !robot.error && <>
         <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
           <div className="flex flex-wrap items-center gap-3"><h1 className="break-words text-2xl font-semibold">{robot.data.name}</h1><RobotStatus status={state?.status ?? robot.data.status} /></div>
-          <ControlLeaseManager owns={control.owns} available={connected && online && !state?.lease.expires_at}
+          <ControlLeaseManager owns={control.owns} available={connected && online && state?.status !== 'BUSY'}
             pending={control.pending} onAcquire={() => { void control.acquire() }} onRelease={() => { void control.release() }} />
         </div>
         {(control.error || control.queryError) && <p role="alert" className="form-error mb-5">{control.error || 'Không thể tải trạng thái điều khiển'}<button className="ml-3 underline" onClick={control.retry}>Thử lại</button></p>}
@@ -39,7 +39,7 @@ export function RobotControlPage() {
             <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
               <ControlModeSelector mode={state?.requested_mode ?? 'MANUAL'} disabled={!control.owns || !connected || !online || Boolean(state?.mode_pending) || control.pending}
                 onChange={(mode) => { void control.mode(mode) }} />
-              <span role="status" className="text-sm text-slate-500">{control.loading ? 'Đang tải…' : !connected ? 'Mất kết nối điều khiển' : !control.owns ? state?.lease.expires_at ? 'Xe đang bận' : 'Chưa nhận điều khiển' : state?.mode_pending ? 'Chờ thiết bị' : 'Đang giữ quyền'}</span>
+              <span role="status" className="text-sm text-slate-500">{control.loading ? 'Đang tải…' : !connected ? 'Mất kết nối điều khiển' : !control.owns ? state?.status === 'BUSY' ? 'Xe đang bận' : 'Chưa nhận điều khiển' : state?.mode_pending ? 'Chờ thiết bị' : 'Đang giữ quyền'}</span>
             </div>
             <ManualDPad key={control.canDrive ? 'ready' : 'disabled'} disabled={!control.canDrive} onStart={control.start} onStop={control.stop} />
           </section>
@@ -47,11 +47,12 @@ export function RobotControlPage() {
             <dl className="mb-6 grid gap-5 sm:grid-cols-2">
               <div><dt className="text-sm text-slate-500">Chế độ yêu cầu</dt><dd className="mt-1">{state ? state.requested_mode === 'MANUAL' ? 'Manual' : 'Auto' : 'Chưa có dữ liệu'}</dd></div>
               <div><dt className="text-sm text-slate-500">Chế độ thiết bị</dt><dd className="mt-1">{state?.telemetry_fresh && state.actual_mode ? state.actual_mode === 'MANUAL' ? 'Manual' : 'Auto' : 'Chưa xác nhận'}</dd></div>
-              <div><dt className="text-sm text-slate-500">Chuyển động thiết bị</dt><dd className="mt-1">{state?.telemetry_fresh && state.actual_movement ? movements[state.actual_movement] : 'Chưa xác nhận'}</dd></div>
+              <div><dt className="text-sm text-slate-500">Tín hiệu động cơ</dt><dd className="mt-1">{state?.telemetry_fresh && state.actual_movement ? movements[state.actual_movement] : 'Chưa xác nhận'}</dd></div>
               <div><dt className="text-sm text-slate-500">Kết nối điều khiển</dt><dd className="mt-1">{connected ? 'Đã kết nối' : control.connection === 'connecting' ? 'Đang kết nối…' : 'Mất kết nối'}</dd></div>
               <div><dt className="text-sm text-slate-500">Lệnh backend</dt><dd className="mt-1">{control.accepted ? 'Đã nhận yêu cầu' : '—'}</dd></div>
               <CommandAcknowledgement state={state} />
             </dl>
+            <p className="mb-4 text-sm text-slate-500">Xe chưa có cảm biến tốc độ bánh xe. Tín hiệu động cơ cho biết hướng xuất ra mạch, chưa xác nhận xe đã di chuyển.</p>
             <ObstacleStatus state={state} />
             <dl className="mt-6 grid gap-5 border-t border-slate-100 pt-5 text-sm sm:grid-cols-2">
               <div><dt className="text-slate-500">Device ID</dt><dd className="mt-1 break-all font-mono">{robot.data.device_id}</dd></div>

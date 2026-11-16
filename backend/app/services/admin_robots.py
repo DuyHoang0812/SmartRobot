@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
 from app.models import AuditLog, DeviceSession, Robot
+from app.models.enums import RobotStatus
 from app.repositories.admin import RobotRepository
 from app.repositories.auth import AuthRepository
 from app.schemas.admin import CredentialResponse, RobotCreate, RobotResponse, RobotUpdate
@@ -25,7 +26,23 @@ class RobotManagementService:
 
     def response(self, robot: Robot) -> RobotResponse:
         status = self.repository.status(robot.id, AuthRepository(self.db).now())
-        return RobotResponse.model_validate({**robot.__dict__, "status": status})
+        return self.serialize(robot, status)
+
+    @staticmethod
+    def serialize(robot: Robot, status: RobotStatus) -> RobotResponse:
+        # SQLAlchemy's instance dict can omit unset nullable or expired columns.
+        # Read mapped attributes explicitly, with a public-field allowlist.
+        return RobotResponse(
+            id=robot.id,
+            name=robot.name,
+            device_id=robot.device_id,
+            is_active=robot.is_active,
+            is_simulated=robot.is_simulated,
+            last_seen_at=robot.last_seen_at,
+            created_at=robot.created_at,
+            updated_at=robot.updated_at,
+            status=status,
+        )
 
     def _audit(self, action: str, robot: Robot, **metadata) -> None:
         self.db.add(

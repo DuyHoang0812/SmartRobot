@@ -29,12 +29,29 @@ it('serializes requests and drops queued moves after a stop', async () => {
   expect(sequences[1]).toBeGreaterThan(sequences[0])
 })
 
-it('stops before switching mode and before releasing the lease', async () => {
+it('uses MODE as the handoff fence and stops before returning the robot', async () => {
   const service = new RobotControlService('r1')
   await service.acquire()
   await service.mode('AUTO')
   await service.release()
-  expect(fetchMock.mock.calls.map(([url]) => String(url).split('/').at(-1))).toEqual(['acquire', 'stop', 'mode', 'stop', 'release'])
+  expect(fetchMock.mock.calls.map(([url]) => String(url).split('/').at(-1))).toEqual(['acquire', 'mode', 'stop', 'release'])
+})
+
+it('drops queued Manual moves before a mode handoff without an extra STOP', async () => {
+  const service = new RobotControlService('r1')
+  await service.acquire()
+  let finish: (response: Response) => void = () => {}
+  fetchMock.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+  const intent = service.beginIntent()
+  const first = service.move('FORWARD', intent)
+  await Promise.resolve()
+  const queued = service.move('FORWARD', intent)
+  const mode = service.mode('AUTO')
+  finish(json({ command_id: 'first' }))
+  await Promise.all([first, queued, mode])
+  expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/move'))).toHaveLength(1)
+  expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/stop'))).toBe(false)
+  expect(String(fetchMock.mock.calls.at(-1)?.[0])).toMatch(/\/mode$/)
 })
 
 it('retains request IDs in serialized JSON without putting secrets in URLs', async () => {

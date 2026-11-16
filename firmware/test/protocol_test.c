@@ -14,6 +14,7 @@ static cJSON *envelope(void)
     cJSON *j = cJSON_CreateObject();
     cJSON_AddStringToObject(j, "robot_id", robot);
     cJSON_AddStringToObject(j, "device_session_id", sid);
+    cJSON_AddStringToObject(j, "control_session_id", lid);
     cJSON_AddStringToObject(j, "server_time", "2026-11-15T16:00:02.100Z");
     cJSON_AddNumberToObject(j, "sequence", 2);
     cJSON_AddNumberToObject(j, "generation", 3);
@@ -55,8 +56,24 @@ int main(int argc, char **argv)
     strcpy(s.robot_id, robot); strcpy(s.session_id, sid);
     cJSON *j = envelope(); envelope_t e;
     assert(protocol_envelope(j, &s, 1000000, 1100000, &e));
+    assert(!strcmp(e.lease_id, lid));
     assert(e.command.deadline_us == 1580000); // 600ms remaining minus RTT and 20ms margin.
-    assert(!protocol_envelope(j, &s, 1000000, 1600000, &e));
+    cJSON_ReplaceItemInObject(j, "lease_expires_at", cJSON_CreateNull());
+    assert(protocol_envelope(j, &s, 1000000, 1100000, &e));
+    assert(e.command.deadline_us == 1580000); // Persistent borrow still has bounded actuation.
+    cJSON_DeleteItemFromObject(j, "lease_expires_at");
+    assert(!protocol_envelope(j, &s, 1000000, 1100000, &e));
+    cJSON_AddStringToObject(j, "lease_expires_at", "2026-11-15T16:00:12Z");
+    assert(protocol_envelope(j, &s, 1000000, 1600000, &e) && e.expired);
+    assert(protocol_write_result(409, true, false) == WRITE_SUPERSEDED);
+    assert(protocol_write_result(409, false, false) == WRITE_RETRY);
+    assert(protocol_write_result(200, true, true) == WRITE_OK);
+    assert(protocol_write_result(200, true, false) == WRITE_FAILED);
+    assert(protocol_write_result(401, true, false) == WRITE_FAILED);
+    assert(protocol_write_result(500, true, false) == WRITE_RETRY);
+    assert(protocol_write_result(-1, false, false) == WRITE_RETRY);
+    assert(protocol_write_result(408, true, false) == WRITE_RETRY);
+    assert(protocol_write_result(429, true, false) == WRITE_RETRY);
     const char *directions[] = {"FORWARD", "BACKWARD", "TURN_LEFT", "TURN_RIGHT"};
     for (int n = 0; n < 4; ++n) {
         cJSON *cmd = cJSON_GetObjectItemCaseSensitive(j, "command");
@@ -96,6 +113,16 @@ int main(int argc, char **argv)
     cJSON_ReplaceItemInObject(j, "command", cJSON_CreateNull());
     cJSON_ReplaceItemInObject(j, "authorization_expires_at", cJSON_CreateNull());
     assert(protocol_envelope(j, &s, 1000000, 1100000, &e) && !e.authorized);
+    assert(!strcmp(e.lease_id, lid)); // No motion command does not end the borrow/power.
+    cJSON_ReplaceItemInObject(j, "control_session_id", cJSON_CreateNull());
+    assert(protocol_envelope(j, &s, 1000000, 1100000, &e) && !e.lease_id[0]);
+    cJSON_ReplaceItemInObject(j, "control_session_id", cJSON_CreateString("bad"));
+    assert(!protocol_envelope(j, &s, 1000000, 1100000, &e));
+    cJSON_Delete(j); j = envelope();
+    cJSON_ReplaceItemInObject(j, "control_session_id", cJSON_CreateString(sid));
+    assert(!protocol_envelope(j, &s, 1000000, 1100000, &e)); // Borrow/command identity must match.
+    cJSON_DeleteItemFromObject(j, "control_session_id");
+    assert(protocol_envelope(j, &s, 1000000, 1100000, &e) && !strcmp(e.lease_id, lid));
     cJSON_Delete(j);
 
     command_t command = {.sequence = 2, .generation = 3, .kind = KIND_MODE,

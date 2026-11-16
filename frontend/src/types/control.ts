@@ -7,7 +7,7 @@ export type Obstacle = 'CLEAR' | 'BLOCKED' | 'SENSOR_ERROR'
 export type SocketStatus = 'connecting' | 'connected' | 'disconnected'
 
 export interface LeaseView { id: string | null; owned: boolean; expires_at: string | null }
-export interface LeaseGrant extends LeaseView { id: string; expires_at: string; lease_token: string; renew_after_ms: number }
+export interface LeaseGrant extends LeaseView { id: string; lease_token: string; renew_after_ms: number }
 export interface RobotCommand {
   command_id: string; robot_id: string; control_session_id: string; sequence: number;
   generation: number; kind: 'MOVE' | 'STOP' | 'MODE' | 'KEEPALIVE'; mode: Mode;

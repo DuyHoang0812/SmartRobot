@@ -106,6 +106,7 @@ class CommandDelivery(ControlInput):
     requested_mode: RobotMode
     mode_pending: bool
     control_authorized: bool
+    control_session_id: UUID | None = None
     authorization_expires_at: datetime | None
     lease_expires_at: datetime | None
     command: CommandView | None
