@@ -183,7 +183,7 @@ giá trị Wi-Fi credential cũ khỏi source, không dùng để build firmware
 
 ## Cấu hình, upload và monitor
 
-Hướng dẫn chi tiết: [firmware/README.md](../firmware/README.md).
+Hướng dẫn chi tiết: [README tổng](../README.md#setup-build-và-nạp-firmware).
 
 Điền device.local.json đã gitignore: Wi-Fi SSID/password, URL laptop `/api/v1/devices`,
 Device ID/secret do Admin cấp, CA PEM/hostname, NTP; timing/speeds/arming/relay policy.
